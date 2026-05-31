@@ -1,34 +1,93 @@
-# Relay — a multi-agent handoff-degradation harness
+# Relay — selective intervention for lossy multi-agent hand-offs
+
+> Built for the **Multi-Agent Orchestration Build Day** (The Engine, Cambridge ·
+> AGI House × W&B × TNT × SundAI × E14). Benchmark: **Microsoft Research
+> [DELEGATE52](https://huggingface.co/datasets/microsoft/delegate52)** — round-trip
+> document editing under delegation.
 
 Relay is a runtime observability harness — a flight recorder + circuit breaker —
 for **lossy multi-agent hand-offs**. A workflow relays a structured document
 through a chain of reversible edits. A **Conductor** estimates each step's
 *handoff-degradation risk* from cheap, **key-free** signals and selectively
-performs a **targeted repair** only when risk spikes. We then validate whether
-that signal actually has decision value by comparing four conditions over the
-same tasks:
+performs a **targeted repair** only when risk spikes.
+
+**The pitch.** Current practice for keeping an agent chain faithful is to dump
+the full source context into every hop — accurate but expensive, and it scales
+its cost with the chain. Relay's claim is that **selective intervention** —
+re-grounding *only* the hops where a cheap signal says corruption spiked —
+captures most of the fidelity of always-regrounding at a fraction of the cost.
+We prove it by comparing four conditions over the same tasks:
 
 | Condition | What it proves | Cost | Fidelity |
 |---|---|---|---|
 | `naive` | loss exists | low | low |
-| `always_reground` | recovery is possible (upper bound) | high | high |
+| `always_reground` | recovery is possible (upper bound — today's SOTA "dump full context") | high | high |
 | `random_at_budget` | re-grounding *itself* helps | = adaptive | modest |
 | `adaptive` | **the signal has decision value** | = random | best per token |
 
 **The whole project is `adaptive` vs `random_at_budget`** — at the *same* number
 of interventions, does the cheap risk signal pick *better moments* than chance?
+Adaptive **must beat random** for the signal to count as a legitimate
+improvement (beating naive alone would just prove that re-grounding helps, which
+is obvious). We don't claim a factuality detector; the scientific claim is
+operational — *does this risk model pick better re-grounding moments than random
+at the same budget?* Gold answers are used **only** for final scoring, so
+nothing is circular.
+
+---
+
+## What's in this repo
+
+Two harnesses share the same four-condition experiment and the same
+adaptive-vs-random thesis:
+
+- **`relay/` + `run_all_conditions.py`** — the portable, **domain-agnostic**
+  harness. It generates a synthetic structured JSON document and relays it
+  through reversible edits. Pure-stdlib mock editor, **no API key required** —
+  this is the fastest way to see the whole pipeline and the leaderboard.
+- **`delegate_relay/`** — the harness **specialized to DELEGATE52**. It relays a
+  *real* document (an accounting ledger, or a chess PGN) through structurally
+  reversible edit pairs, scores round-trip fidelity ∈ [0,1] against the seed,
+  and runs the same four conditions on W&B Inference + Weave. See
+  [`delegate_relay/README.md`](delegate_relay/README.md).
+
+> **See also the [`amar`](../../tree/amar) branch — per-domain customized evals.**
+> The default harness runs the *same* generic eval content across every domain.
+> The `amar` branch instead **customizes the eval per domain** (accounting
+> ledgers vs. chess move sequences) — a ledger-aware scorer/signal set and a
+> PGN-aware one — and gives the intervening **Conductor agent its own
+> domain-specific eval** rather than one shared notion of "corruption." Adding
+> those individual per-domain evals **measurably improves** the selective
+> intervention: on the chess domain, adaptive reaches **0.896** fidelity vs
+> random's **0.761** at the same budget (**+0.135**), while always-reground
+> costs ~60% more tokens for a 1.000 ceiling. That result is the evidence for
+> our broader vision (below): tailoring evals per domain compounds the gains of
+> selective intervention.
+
+### Vision (where this goes)
+
+Much like Google's AlphaGo/AlphaProof line selects the appropriate solver per
+domain, we expect even larger gains if the system **selects domain-appropriate
+eval methods** — the mapping of solve/repair tactics to the problem at hand —
+rather than applying one generic notion of fidelity everywhere. The `amar`
+branch is the first datapoint: tailoring the eval to the two test domains we
+chose (Chess and Auditing/accounting) produced dramatic improvements, supporting
+that a customized per-domain eval suite further advances selective intervention
+and leads to coordinated agent swarms with better grounding faithfulness at
+lower cost.
 
 ---
 
 ## The task: round-trip reconstruction
 
-Generate a structured JSON document (15–20 records, stable IDs, nested fields,
-numeric values, known totals), transform it with **three reversible edit pairs**
-over several round trips, then reverse them — a faithful workflow reconstructs
-the seed. The Conductor watches a **key-free checksum** after every edit and
-performs a **targeted repair** (restore the flagged invariants, *preserve* the
-legitimate edit — never just reset to the seed) only when risk fires. All four
-conditions run on the same tasks / edits / round-trips; only the policy changes.
+Generate a structured document (the portable harness: 15–20 JSON records, stable
+IDs, nested fields, numeric values, known totals; the DELEGATE52 harness: a real
+ledger or PGN), transform it with **reversible edit pairs** over several round
+trips, then reverse them — a faithful workflow reconstructs the seed. The
+Conductor watches a **key-free checksum** after every edit and performs a
+**targeted repair** (restore the flagged invariants, *preserve* the legitimate
+edit — never just reset to the seed) only when risk fires. All four conditions
+run on the same tasks / edits / round-trips; only the policy changes.
 
 ---
 
@@ -72,9 +131,23 @@ export WANDB_API_KEY=...  WANDB_PROJECT=entity/project
 python run_all_conditions.py --n 20 --live
 ```
 
+### DELEGATE52 harness (`delegate_relay/`)
+
+```bash
+cd delegate_relay
+pip install -r requirements.txt
+export WANDB_API_KEY=...                       # W&B Inference + Weave
+export WANDB_PROJECT=entity/relay-delegate52
+
+# offline, no inference API — validates the whole pipeline in seconds
+RELAY_MOCK=1 python run_conditions.py --n 10 --depth 4 --target-rate 0.30
+# pick the domain (default accounting):
+RELAY_DOMAIN=chess RELAY_MOCK=1 python run_conditions.py --n 10 --depth 4
+```
+
 ---
 
-## CLI
+## CLI (`run_all_conditions.py`)
 
 ```
 python run_all_conditions.py \
@@ -154,6 +227,10 @@ python gate_read.py
   outputs above, applies the gate, and (creds-only) auto-publishes via
   `weave_leaderboard`.
 
+For the DELEGATE52-specific modules (the per-domain `domain.py` dispatcher,
+`ledger.py`, `chess_domain.py`, `signals.py`, `conductor.py`, `run_conditions.py`,
+`run_gate.py`) see [`delegate_relay/README.md`](delegate_relay/README.md).
+
 ---
 
 ## Environment variables (real path only)
@@ -184,7 +261,10 @@ sequential calls with exponential backoff (handled in `relay/wandb_client.py`).
 The signals are **cheap runtime features, not a factuality detector**. The
 scientific claim is operational: *does this risk model pick better re-grounding
 moments than random at the same budget?* Gold answers are used **only** for final
-scoring — no signal touches them, so nothing is circular.
+scoring — no signal touches them, so nothing is circular. Results are descriptive
+over a small slice (no p-values on tiny n) — a proof of concept that selective
+intervention beats budget-matched random, and that per-domain evals (the `amar`
+branch) push it further.
 
 ## Install (only for the real path)
 
