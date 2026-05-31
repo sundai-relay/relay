@@ -1,0 +1,17 @@
+# Mock mode and the round-trip MOCK editor (offline, no key) need NOTHING
+# beyond the Python stdlib:
+#     python run.py --substrate mock --condition all --n 5
+#     python run_all_conditions.py --n 20            # mock editor, no credits
+#
+# The packages below are only needed for Weave tracing + the LIVE round-trip
+# path that calls W&B Inference:
+openai>=1.30
+weave>=0.51
+
+# For outputs/frontier.png (run_all_conditions.py). Falls back to frontier.txt
+# if unavailable, so it's optional:
+matplotlib>=3.7
+
+# Optional — only when fleshing out McqSubstrate (data + drift signal):
+# datasets>=2.19
+# sentence-transformers>=2.7
