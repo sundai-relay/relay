@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import time
 
+from . import llm_cache
 from .weave_compat import op
 
 STRONG_MODEL = "meta-llama/Llama-3.3-70B-Instruct"
@@ -47,7 +48,21 @@ class WandbInferenceClient:
     @op()
     def chat(self, model: str, system: str, user: str, temperature: float = 0.0,
              max_tokens: int = 512, **kwargs) -> str:
-        """One chat completion with sequential 429 backoff. Returns the text."""
+        """One chat completion with sequential 429 backoff. Returns the text.
+
+        At ``temperature == 0`` the call is deterministic, so it is served from
+        (and stored to) the on-disk cache -- overlapping prompts across
+        conditions and across a relaunch are replayed instead of re-billed.
+        """
+        use_cache = llm_cache.cacheable(temperature)
+        cache_key = (llm_cache.key_for(model, system, user, temperature,
+                                       max_tokens, **kwargs)
+                     if use_cache else None)
+        if cache_key is not None:
+            hit = llm_cache.get(cache_key)
+            if hit is not None:
+                return hit
+
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
@@ -59,7 +74,10 @@ class WandbInferenceClient:
                 r = self.client.chat.completions.create(
                     model=model, messages=messages, temperature=temperature,
                     max_tokens=max_tokens, **kwargs)
-                return r.choices[0].message.content or ""
+                text = r.choices[0].message.content or ""
+                if cache_key is not None:
+                    llm_cache.put(cache_key, text)
+                return text
             except Exception as e:  # noqa: BLE001 - we classify by message
                 last_err = e
                 msg = str(e).lower()

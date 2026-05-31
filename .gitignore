@@ -15,3 +15,9 @@ venv/
 
 # Relay run artifacts
 outputs/*
+!outputs/.gitkeep
+
+# Relay LLM disk cache (temp=0 replay across runs)
+.cache/
+# Relay run artifacts
+outputs
