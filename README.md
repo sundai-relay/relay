@@ -80,7 +80,8 @@ python run_all_conditions.py --n 20 --live
 python run_all_conditions.py \
     [--n 20] [--conditions naive always_reground adaptive random_at_budget] \
     [--num-round-trips 4] [--threshold 0.008] [--slip-p 0.6] \
-    [--rng-seed 42] [--random-seed 123] [--mock | --live] [--out-dir outputs]
+    [--rng-seed 42] [--random-seed 123] [--mock | --live] \
+    [--provider wandb|openai] [--workers N] [--no-weave] [--out-dir outputs]
 ```
 
 | Flag | Meaning |
@@ -91,7 +92,10 @@ python run_all_conditions.py \
 | `--threshold` | adaptive re-grounds when `risk > threshold` (see note below) |
 | `--slip-p` | (mock) probability an edit loses something |
 | `--rng-seed` / `--random-seed` | task generation / random-at-budget decisions |
-| `--mock` / `--live` | force the mock editor / real W&B Inference (else auto-detect) |
+| `--mock` / `--live` | force the mock editor / real inference (else auto-detect) |
+| `--provider` | LIVE backend: `wandb` (default) or `openai` (`$OPENAI_API_KEY`, `gpt-4o-mini`) |
+| `--workers` | parallel tasks per condition (forced to 1 for `wandb`, which 429s on concurrency) |
+| `--no-weave` | skip Weave tracing (faster; recommended with `--workers`) |
 
 > Adaptive runs before `random_at_budget` so random can match adaptive's
 > *observed* per-task intervention rate.
@@ -110,6 +114,9 @@ python run_all_conditions.py \
   intervened, cost_proxy, final_score, ...}` (`final_score` is the task's final
   structural score, stamped on every row of that task; `0.0` means the final doc
   did not parse).
+- `task_summary.jsonl` — one row per (condition, task) carrying the full
+  `final_doc` (which the lean `results.jsonl` strips), so the leaderboard
+  publisher can re-score sub-metrics from disk without re-running the workflow.
 - `leaderboard.md` — the 4-row comparison:
   `condition | avg_score | avg_interventions | intervention_rate | cost_proxy | score_per_cost`.
 - `frontier.png` — cost vs fidelity (`frontier.txt` if matplotlib is absent).
@@ -138,9 +145,14 @@ python gate_read.py
 - `conductor.py` — `should_intervene(...)`, the functional re-grounding rule.
 - `weave_compat.py` — `@op()` works with or without `weave`; `weave.init` only
   fires with real creds.
+- `weave_leaderboard.py` — publishes a Weave **Evaluation + Leaderboard** over the
+  four policies (`structural_score` + `intervention_rate` + `cost` columns) by
+  **pure lookup** of already-computed results — no workflow re-run, no credits.
+  Also a standalone CLI: `python -m relay.weave_leaderboard --results outputs/results.jsonl`.
+  The `outputs/leaderboard.md` table is always written, with or without `weave`.
 - `run_all_conditions.py` — the entry point: runs the four conditions, writes the
-  outputs above, applies the gate, and (creds-only) publishes a `weave.Evaluation`
-  + 4-condition `Leaderboard` by **looking up already-computed scores** (no re-run).
+  outputs above, applies the gate, and (creds-only) auto-publishes via
+  `weave_leaderboard`.
 
 ---
 
