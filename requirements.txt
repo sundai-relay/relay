@@ -11,3 +11,8 @@ wandb>=0.27.0
 # For outputs/frontier.png (run_all_conditions.py). Falls back to frontier.txt
 # if unavailable, so it's optional:
 matplotlib>=3.7
+
+# Real DELEGATE52 chess substrate (relay/delegate/pgn.py): PGN parsing, move
+# legality, final-FEN. Install the prebuilt wheel:
+#     pip install --only-binary :all: chess
+chess>=1.10
