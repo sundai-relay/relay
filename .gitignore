@@ -19,3 +19,5 @@ outputs/*
 
 # Relay LLM disk cache (temp=0 replay across runs)
 .cache/
+# Relay run artifacts
+outputs
