@@ -21,3 +21,7 @@ outputs/*
 .cache/
 # Relay run artifacts
 outputs
+
+# transient run logs
+outputs_run.log
+*.log
