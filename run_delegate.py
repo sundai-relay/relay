@@ -60,10 +60,20 @@ def _run_condition(domain, cond, tasks, threshold, random_rate, rng_seed, nrt,
 
 
 def _auto_threshold(domain, tasks, target_rate, rng_seed, nrt, sink):
-    """Run naive, collect per-step risks, return (results, threshold)."""
+    """Run naive, collect per-step risks, return (results, threshold).
+
+    With a weak editor and a deep compounding chain, many late steps saturate at
+    risk 1.0 (the reconstruction fully collapsed). A naive quantile then lands at
+    1.0 and DISABLES adaptive (no risk can exceed 1.0). To keep the signal
+    actionable we target the quantile of the *non-saturated* steps, so adaptive
+    fires on the early, still-recoverable partial corruption that precedes a
+    collapse — exactly where an intervention can prevent the cascade."""
     res = _run_condition(domain, "naive", tasks, 0.0, None, rng_seed, nrt, sink)
     risks = [r["runtime_risk"] for v in res.values() for r in v[0]]
     thr = float(np.quantile(risks, 1 - target_rate)) if risks else 0.0
+    if thr >= 1.0:
+        sub = [r for r in risks if r < 1.0]
+        thr = float(np.quantile(sub, 1 - target_rate)) if sub else 0.5
     return res, thr, risks
 
 
