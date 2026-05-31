@@ -59,13 +59,16 @@ def _aggregate(cond: str, per_task: Dict[str, tuple]) -> dict:
     }
 
 
-def _run_condition(cond, tasks, threshold, random_rate, rng_seed, nrt) -> Dict[str, tuple]:
+def _run_condition(cond, tasks, threshold, random_rate, rng_seed, nrt,
+                   sink=None) -> Dict[str, tuple]:
     out = {}
     for t in tasks:
         rows, final, counts = run_task(t, cond, threshold=threshold,
                                        random_rate=random_rate, rng_seed=rng_seed,
                                        num_round_trips=nrt)
         out[t.task_id] = (rows, final, counts)
+        if sink is not None:
+            sink(cond, rows)  # append this task-run to the trace as it completes
     return out
 
 
@@ -110,30 +113,47 @@ def main() -> None:
           f"threshold={args.threshold} mode={'MOCK' if use_mock else 'LIVE'} "
           f"weave={'on' if weave_active else 'off'}")
 
-    results: Dict[str, Dict[str, tuple]] = {}
-
-    # naive / always / adaptive in order; adaptive needed before random.
-    for cond in ("naive", "always_reground", "adaptive"):
-        if cond in requested or (cond == "adaptive" and "random_at_budget" in requested):
-            results[cond] = _run_condition(cond, tasks, args.threshold, None,
-                                           args.random_seed, args.num_round_trips)
-
-    if "random_at_budget" in requested:
-        adaptive_summary = _aggregate("adaptive", results["adaptive"])
-        random_rate = adaptive_summary["intervention_rate"]
-        print(f"[relay] adaptive observed intervention rate = {random_rate:.3f} "
-              f"-> random-at-budget matches it")
-        results["random_at_budget"] = _run_condition(
-            "random_at_budget", tasks, args.threshold, random_rate,
-            args.random_seed, args.num_round_trips)
-
-    # keep only requested conditions in the report (adaptive may have been run
-    # only to budget random).
+    # report_conds is known up front; adaptive may run only to budget random, in
+    # which case it is NOT part of the report (nor the incremental trace).
     report_conds = [c for c in CANON if c in requested]
-    summaries = [_aggregate(c, results[c]) for c in report_conds]
 
     os.makedirs(args.out_dir, exist_ok=True)
-    _write_jsonl(results, report_conds, os.path.join(args.out_dir, "results.jsonl"))
+    results_path = os.path.join(args.out_dir, "results.jsonl")
+    results: Dict[str, Dict[str, tuple]] = {}
+
+    # Incremental trace: append each task-run as it completes and flush, so a
+    # killed run still leaves a usable partial results.jsonl. (It used to be
+    # written only at the very end -> all-or-nothing; a kill forfeited everything.)
+    with open(results_path, "w") as rf:
+        def _sink(cond, rows):
+            if cond not in report_conds:
+                return
+            for r in rows:
+                rf.write(json.dumps(_lean_row(r)) + "\n")
+            rf.flush()
+            try:
+                os.fsync(rf.fileno())
+            except OSError:
+                pass  # best-effort fsync; flush alone already survives a kill
+
+        # naive / always / adaptive in order; adaptive needed before random.
+        for cond in ("naive", "always_reground", "adaptive"):
+            if cond in requested or (cond == "adaptive" and "random_at_budget" in requested):
+                results[cond] = _run_condition(cond, tasks, args.threshold, None,
+                                               args.random_seed, args.num_round_trips,
+                                               _sink)
+
+        if "random_at_budget" in requested:
+            adaptive_summary = _aggregate("adaptive", results["adaptive"])
+            random_rate = adaptive_summary["intervention_rate"]
+            print(f"[relay] adaptive observed intervention rate = {random_rate:.3f} "
+                  f"-> random-at-budget matches it")
+            results["random_at_budget"] = _run_condition(
+                "random_at_budget", tasks, args.threshold, random_rate,
+                args.random_seed, args.num_round_trips, _sink)
+
+    summaries = [_aggregate(c, results[c]) for c in report_conds]
+
     _write_leaderboard_md(summaries, os.path.join(args.out_dir, "leaderboard.md"))
     _print_leaderboard(summaries)
     _maybe_gate(summaries)
@@ -145,14 +165,13 @@ def main() -> None:
 
 
 # --------------------------------------------------------------------------- #
-def _write_jsonl(results, conds, path):
-    with open(path, "w") as f:
-        for cond in conds:
-            for _tid, (rows, _final, _counts) in results[cond].items():
-                for r in rows:
-                    lean = {k: v for k, v in r.items()
-                            if k not in ("current_doc", "score_components", "instruction")}
-                    f.write(json.dumps(lean) + "\n")
+# current_doc/score_components/instruction are kept on the in-memory rows (for
+# Weave + the demo case) but dropped from the lean jsonl trace.
+_LEAN_DROP = ("current_doc", "score_components", "instruction")
+
+
+def _lean_row(r: dict) -> dict:
+    return {k: v for k, v in r.items() if k not in _LEAN_DROP}
 
 
 def _print_leaderboard(summaries):
