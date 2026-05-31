@@ -48,6 +48,50 @@ python run.py --substrate mock --condition naive    --n 10
 
 ---
 
+## The round-trip build (`run_all_conditions.py`)
+
+The headline task. Generate a structured JSON document (15–20 records, stable
+IDs, nested fields, numeric values, known totals), transform it with **three
+reversible edit pairs** over several round trips, then reverse them — a faithful
+workflow reconstructs the seed. The Conductor watches a **key-free checksum**
+after every edit and performs a **targeted repair** (restore the flagged
+invariants, *preserve* the legitimate edit — never just reset to the seed) only
+when risk fires. Runs the four conditions on the same tasks/edits/round-trips;
+only the policy changes.
+
+```bash
+# Offline, NO key — deterministic mock editor (lossy) + competent repairer:
+python run_all_conditions.py --n 20
+
+# The naive-vs-always gate (build adaptive only once there's a gap to recover):
+python run_all_conditions.py --n 5 --conditions naive always_reground
+#   GREEN  always - naive >= 0.15   (build the Conductor)
+#   YELLOW 0.05 .. 0.15
+#   RED    < 0.05                    (more round trips / higher --slip-p / harder edits)
+
+# With real models (W&B Inference) + Weave tracing:
+export WANDB_API_KEY=...  WANDB_PROJECT=entity/project
+python run_all_conditions.py --n 20 --live
+```
+
+Outputs to `outputs/`: `results.jsonl` (per-step trace), `leaderboard.md`,
+`frontier.png` (cost vs fidelity; `frontier.txt` if matplotlib is absent),
+`demo_case.md` (the clearest naive-loses / adaptive-recovers task).
+
+Modules (`relay/roundtrip/`): `tasks.py` (procedural docs + edit pairs),
+`agents.py` (`apply_edit` / `repair_doc` — real W&B Inference or the mock),
+`checksum.py` (`runtime_risk`), `scorer.py` (`final_structural_score`),
+`runner.py` (one task under one policy). The intervention rule is
+`conductor.should_intervene(...)`.
+
+> **Threshold note:** the checksum risk is *small-magnitude* (one dropped record
+> among ~17 is `id_loss ≈ 0.06`, so `risk ≈ 0.02`), not a 0–1 confidence. The
+> round-trip default `--threshold 0.008` is tuned for ~25–35% interventions.
+> This is the `/goal` knob to tune; **the final structural score never drives
+> the runtime policy.**
+
+---
+
 ## CLI
 
 ```
@@ -137,15 +181,16 @@ before/after change; re-grounding repairs the current hop's damage (local fix);
 expected ordering above is visible. Use this to get the whole pipeline + four
 conditions + Weave + leaderboard GREEN before any real API call.
 
-### `roundtrip` — stub for a teammate, interface wired (`relay/substrates/roundtrip.py`)
-State is a JSON doc; hops are (forward, backward) **reversible** edit pairs; a
-faithful round trip reconstructs the seed. The **key-free / deterministic pieces
-are implemented**: `reference()` (seed doc), `score()` (JSON reconstruction
-similarity — fraction of original `id->value` pairs preserved + numeric-total
-check), `risk()` (**checksum drift** — parse the doc, fraction of original
-ids/keys/counts still intact). **The one TODO is `apply_hop`** — the W&B
-Inference prompt + JSON-response parsing (the prompt is already drafted; just
-enable the `client().chat(...)` call and parse). Search `TODO(teammate)`.
+### `roundtrip` — fully implemented (see `relay/roundtrip/` + `run_all_conditions.py`)
+State is a JSON doc; hops are (forward, backward) **reversible** edit pairs over
+several round trips; a faithful round trip reconstructs the seed. `risk()` =
+checksum drift (`runtime_risk`), `score()` = `final_structural_score` (parse
+validity + id F1 + key-path F1 + scalar value fidelity + aggregate invariants),
+`reground()` = the seed, and `apply_hop` calls `apply_edit` / targeted
+`repair_doc` (real W&B Inference, or a deterministic mock with no key). The
+substrate adapter (`relay/substrates/roundtrip.py`) lets `run.py --substrate
+roundtrip` drive it; `run_all_conditions.py` is the dedicated entry with the
+gate, frontier, and demo case (see the section above).
 
 ### `mcq` — thin stub, fallback (`relay/substrates/mcq.py`)
 State is a handoff memo; hops are relay rewrites; `score` is exact-match of a

@@ -44,6 +44,10 @@ class Substrate(abc.ABC):
     """A pluggable task: how state degrades, how risk reads, how we re-ground."""
 
     name: str = "substrate"
+    # Adaptive threshold appropriate for THIS substrate's risk scale. The mock
+    # risk is ~[0,0.85]; the round-trip checksum risk is much smaller. run.py
+    # uses this when --threshold is not given.
+    default_threshold: float = 0.4
 
     @abc.abstractmethod
     def load_episodes(self, n: int) -> List[Episode]:

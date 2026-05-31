@@ -93,3 +93,18 @@ class Conductor:
 
     def decide(self, episode, hop_index: int, risk_value: float, n_hops: int) -> bool:
         return self.policy.decide(episode, hop_index, risk_value, n_hops)
+
+
+# Functional intervention rule used by the round-trip runner (relay.roundtrip).
+# Mirrors the policy classes above but matches the locked-spec signature.
+def should_intervene(condition: str, risk: float, threshold: float,
+                     random_rate, rng) -> bool:
+    if condition in (NAIVE, "naive"):
+        return False
+    if condition in (ALWAYS, "always_reground", "always"):
+        return True
+    if condition in (ADAPTIVE, "adaptive"):
+        return risk > threshold
+    if condition in (RANDOM, "random_at_budget", "random"):
+        return rng.random() < (random_rate or 0.0)
+    raise ValueError(f"unknown condition: {condition!r}")

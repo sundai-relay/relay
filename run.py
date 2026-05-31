@@ -31,8 +31,9 @@ def main() -> None:
     p.add_argument("--condition",
                    choices=["naive", "always", "adaptive", "random", "all"], default="all")
     p.add_argument("--n", type=int, default=5, help="number of episodes")
-    p.add_argument("--threshold", type=float, default=0.4,
-                   help="adaptive risk threshold (re-ground when risk > threshold)")
+    p.add_argument("--threshold", type=float, default=None,
+                   help="adaptive risk threshold (re-ground when risk > threshold). "
+                        "Defaults to the substrate's own scale if omitted.")
     p.add_argument("--hops", type=int, default=None, help="(mock) hops per episode")
     p.add_argument("--corruption", type=float, default=None,
                    help="(mock) per-hop corruption probability")
@@ -51,13 +52,15 @@ def main() -> None:
             kw["corruption_p"] = args.corruption
     substrate = get_substrate(args.substrate, **kw)
 
+    threshold = args.threshold if args.threshold is not None else substrate.default_threshold
+
     episodes = substrate.load_episodes(args.n)
     print(f"[relay] substrate={args.substrate} condition={args.condition} "
-          f"episodes={len(episodes)} threshold={args.threshold} "
+          f"episodes={len(episodes)} threshold={threshold} "
           f"weave={'on' if weave_active else 'off'}")
 
     results = run_conditions(substrate, episodes, which=args.condition,
-                             threshold=args.threshold, seed=args.seed)
+                             threshold=threshold, seed=args.seed)
 
     path = write_jsonl(results, args.out)
     summary = aggregate(results)
@@ -66,7 +69,7 @@ def main() -> None:
 
     if weave_active:
         maybe_publish(results, substrate, episodes,
-                      threshold=args.threshold, seed=args.seed)
+                      threshold=threshold, seed=args.seed)
 
 
 if __name__ == "__main__":

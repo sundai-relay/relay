@@ -39,7 +39,10 @@ def run_episode(substrate, episode, policy: Policy) -> Tuple[object, List[dict]]
         after = forward
         if intervened:
             grounding = substrate.reground(episode)
-            after = substrate.apply_hop(before, hop, grounding=grounding)
+            # Repair the *degraded* state (targeted re-grounding), not a redo
+            # from `before`. For the mock substrate this is identical; for the
+            # round-trip substrate it is the difference between repair and reset.
+            after = substrate.apply_hop(forward, hop, grounding=grounding)
             grounding_used = grounding
 
         state = after

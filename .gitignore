@@ -14,5 +14,5 @@ venv/
 .env
 
 # Relay run artifacts (keep the dir via outputs/.gitkeep)
-outputs/*.jsonl
-outputs/*.png
+outputs/*
+!outputs/.gitkeep
