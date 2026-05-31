@@ -59,13 +59,16 @@ def _aggregate(cond: str, per_task: Dict[str, tuple]) -> dict:
     }
 
 
-def _run_condition(cond, tasks, threshold, random_rate, rng_seed, nrt) -> Dict[str, tuple]:
+def _run_condition(cond, tasks, threshold, random_rate, rng_seed, nrt,
+                   jsonl_path=None) -> Dict[str, tuple]:
     out = {}
     for t in tasks:
         rows, final, counts = run_task(t, cond, threshold=threshold,
                                        random_rate=random_rate, rng_seed=rng_seed,
                                        num_round_trips=nrt)
         out[t.task_id] = (rows, final, counts)
+        if jsonl_path:                            # flush each completed task-run now
+            _append_lean_rows(jsonl_path, rows)   # so an interrupted run keeps its data
     return out
 
 
@@ -112,11 +115,19 @@ def main() -> None:
 
     results: Dict[str, Dict[str, tuple]] = {}
 
+    # Truncate the JSONL up front, then append each completed task-run as it
+    # finishes (see _run_condition) so an interrupted run still leaves a usable
+    # leaderboard on disk.
+    os.makedirs(args.out_dir, exist_ok=True)
+    jsonl_path = os.path.join(args.out_dir, "results.jsonl")
+    open(jsonl_path, "w").close()
+
     # naive / always / adaptive in order; adaptive needed before random.
     for cond in ("naive", "always_reground", "adaptive"):
         if cond in requested or (cond == "adaptive" and "random_at_budget" in requested):
             results[cond] = _run_condition(cond, tasks, args.threshold, None,
-                                           args.random_seed, args.num_round_trips)
+                                           args.random_seed, args.num_round_trips,
+                                           jsonl_path=jsonl_path if cond in requested else None)
 
     if "random_at_budget" in requested:
         adaptive_summary = _aggregate("adaptive", results["adaptive"])
@@ -125,15 +136,13 @@ def main() -> None:
               f"-> random-at-budget matches it")
         results["random_at_budget"] = _run_condition(
             "random_at_budget", tasks, args.threshold, random_rate,
-            args.random_seed, args.num_round_trips)
+            args.random_seed, args.num_round_trips, jsonl_path=jsonl_path)
 
     # keep only requested conditions in the report (adaptive may have been run
     # only to budget random).
     report_conds = [c for c in CANON if c in requested]
     summaries = [_aggregate(c, results[c]) for c in report_conds]
 
-    os.makedirs(args.out_dir, exist_ok=True)
-    _write_jsonl(results, report_conds, os.path.join(args.out_dir, "results.jsonl"))
     _write_leaderboard_md(summaries, os.path.join(args.out_dir, "leaderboard.md"))
     _print_leaderboard(summaries)
     _maybe_gate(summaries)
@@ -145,14 +154,18 @@ def main() -> None:
 
 
 # --------------------------------------------------------------------------- #
-def _write_jsonl(results, conds, path):
-    with open(path, "w") as f:
-        for cond in conds:
-            for _tid, (rows, _final, _counts) in results[cond].items():
-                for r in rows:
-                    lean = {k: v for k, v in r.items()
-                            if k not in ("current_doc", "score_components", "instruction")}
-                    f.write(json.dumps(lean) + "\n")
+def _lean_row(r):
+    return {k: v for k, v in r.items()
+            if k not in ("current_doc", "score_components", "instruction")}
+
+
+def _append_lean_rows(path, rows):
+    """Append one task-run's rows immediately (and flush) so an interrupted run
+    still leaves a usable results.jsonl / leaderboard on disk instead of nothing."""
+    with open(path, "a") as f:
+        for r in rows:
+            f.write(json.dumps(_lean_row(r)) + "\n")
+        f.flush()
 
 
 def _print_leaderboard(summaries):
