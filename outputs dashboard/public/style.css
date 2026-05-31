@@ -108,6 +108,11 @@ body {
   box-shadow: 0 0 8px var(--gate-red);
 }
 
+#connection-bar.static #connection-dot {
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--accent);
+}
+
 #result-counter {
   margin-left: auto;
   font-family: 'JetBrains Mono', 'Fira Code', monospace;
@@ -728,6 +733,105 @@ tbody tr.row-enter {
   padding: 2px 8px;
   border-radius: 4px;
   color: var(--accent);
+}
+
+/* ── Global Filters Section ────────────────────────────────────────── */
+#global-filters-section {
+  padding-bottom: 16px;
+}
+
+.filters-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 18px 24px;
+}
+
+.filter-group-title {
+  font-size: 0.65rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  margin-bottom: 12px;
+}
+
+.filters-row {
+  display: flex;
+  gap: 32px;
+  flex-wrap: wrap;
+}
+
+.filter-category {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.category-label {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.filter-pills {
+  display: flex;
+  gap: 8px;
+}
+
+.filter-pill {
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 6px 16px;
+  cursor: pointer;
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.filter-pill::before {
+  content: '';
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  transition: all 0.25s;
+}
+
+.filter-pill:hover {
+  color: var(--text-primary);
+  border-color: var(--border-accent);
+  background: var(--bg-hover);
+}
+
+.filter-pill.active {
+  color: var(--text-primary);
+  background: var(--bg-elevated);
+}
+
+#filter-domain-pills .filter-pill.active {
+  border-color: var(--c-always);
+  box-shadow: 0 0 10px rgba(96, 165, 250, 0.15);
+}
+
+#filter-domain-pills .filter-pill.active::before {
+  background: var(--c-always);
+  box-shadow: 0 0 6px var(--c-always);
+}
+
+#filter-tuning-pills .filter-pill.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 10px rgba(99, 179, 237, 0.15);
+}
+
+#filter-tuning-pills .filter-pill.active::before {
+  background: var(--accent);
+  box-shadow: 0 0 6px var(--accent);
 }
 
 .hidden { display: none !important; }

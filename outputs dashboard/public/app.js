@@ -21,9 +21,16 @@
   };
 
   // ── State ───────────────────────────────────────────────────────────
-  let allResults = [];
+  let allResults = {
+    accounting: [],
+    accounting_tuned: [],
+    chess: [],
+    chess_tuned: []
+  };
   let ws = null;
   let reconnectTimer = null;
+  let hasConnectedOnce = false;
+  let staticMode = false;
   const RECONNECT_DELAY = 2000;
 
   // ── DOM refs ────────────────────────────────────────────────────────
@@ -56,6 +63,22 @@
     if (s >= 0.95) return "score-good";
     if (s >= 0.8)  return "score-mid";
     return "score-low";
+  }
+
+  function getFilteredResults() {
+    const activeDomains = Array.from(document.querySelectorAll("#filter-domain-pills .filter-pill.active")).map(el => el.dataset.value);
+    const activeTunings = Array.from(document.querySelectorAll("#filter-tuning-pills .filter-pill.active")).map(el => el.dataset.value);
+
+    let merged = [];
+    if (activeDomains.includes("accounting")) {
+      if (activeTunings.includes("base")) merged.push(...(allResults.accounting || []));
+      if (activeTunings.includes("tuned")) merged.push(...(allResults.accounting_tuned || []));
+    }
+    if (activeDomains.includes("chess")) {
+      if (activeTunings.includes("base")) merged.push(...(allResults.chess || []));
+      if (activeTunings.includes("tuned")) merged.push(...(allResults.chess_tuned || []));
+    }
+    return merged;
   }
 
   /** Group results by condition → aggregate stats */
@@ -352,16 +375,18 @@
 
     // Update task filter options
     const currentVal = filterTask.value;
-    const existingOpts = new Set(Array.from(filterTask.options).map((o) => o.value));
+    filterTask.innerHTML = '<option value="">All Tasks</option>';
     for (const tid of taskIds) {
-      if (!existingOpts.has(tid)) {
-        const opt = document.createElement("option");
-        opt.value = tid;
-        opt.textContent = tid;
-        filterTask.appendChild(opt);
-      }
+      const opt = document.createElement("option");
+      opt.value = tid;
+      opt.textContent = tid;
+      filterTask.appendChild(opt);
     }
-    filterTask.value = currentVal;
+    if (taskIds.includes(currentVal)) {
+      filterTask.value = currentVal;
+    } else {
+      filterTask.value = "";
+    }
 
     const displayTasks = taskFilter ? { [taskFilter]: tasks[taskFilter] } : tasks;
 
@@ -435,9 +460,10 @@
 
   // ── Master render ───────────────────────────────────────────────────
   function render(animate = false) {
-    resultCounter.textContent = `${allResults.length} results`;
+    const filtered = getFilteredResults();
+    resultCounter.textContent = `${filtered.length} results`;
 
-    if (allResults.length === 0) {
+    if (filtered.length === 0) {
       emptyState.classList.remove("hidden");
       mainSections.forEach((s) => s.classList.add("hidden"));
       return;
@@ -446,7 +472,7 @@
     emptyState.classList.add("hidden");
     mainSections.forEach((s) => s.classList.remove("hidden"));
 
-    const summaries = aggregateByCondition(allResults);
+    const summaries = aggregateByCondition(filtered);
 
     renderLeaderboard(summaries);
     renderGate(summaries);
@@ -454,16 +480,142 @@
     renderBarChart(interventionBars, summaries, "interventionRate", (v) => (v * 100).toFixed(1) + "%");
     renderBarChart(efficiencyBars, summaries, "scorePerCost", (v) => (v * 1000).toFixed(4));
     renderDistribution(summaries);
-    renderTaskCards(allResults);
-    renderTable(allResults, animate);
+    renderTaskCards(filtered);
+    renderTable(filtered, animate);
+  }
+
+  // ── Static Results Fallback ─────────────────────────────────────────
+  async function loadStaticResults() {
+    connectionBar.className = "static";
+    connectionLabel.textContent = "Static Mode";
+
+    const filenames = {
+      accounting: "accounting.results.jsonl",
+      accounting_tuned: "accounting.results.tuned.jsonl",
+      chess: "chess.results.jsonl",
+      chess_tuned: "chess.results.tuned.jsonl"
+    };
+
+    const prefixes = [
+      "../../outputs/",
+      "../outputs/",
+      "outputs/",
+      "./outputs/"
+    ];
+
+    // Find the first prefix that works by trying to fetch the accounting file
+    let workingPrefix = null;
+    for (const prefix of prefixes) {
+      try {
+        const testUrl = `${prefix}${filenames.accounting}`;
+        const response = await fetch(testUrl, { method: "HEAD" });
+        if (response.ok) {
+          workingPrefix = prefix;
+          console.log(`Found working outputs directory at relative path: ${workingPrefix}`);
+          break;
+        }
+      } catch (e) {
+        // Continue
+      }
+    }
+
+    // Fallback: try standard fetch if HEAD is blocked or fails
+    if (!workingPrefix) {
+      for (const prefix of prefixes) {
+        try {
+          const testUrl = `${prefix}${filenames.accounting}`;
+          const response = await fetch(testUrl);
+          if (response.ok) {
+            workingPrefix = prefix;
+            console.log(`Found working outputs directory via GET at relative path: ${workingPrefix}`);
+            break;
+          }
+        } catch (e) {
+          // Continue
+        }
+      }
+    }
+
+    if (!workingPrefix) {
+      console.error("Could not find outputs directory at any expected relative path.");
+      connectionLabel.textContent = "Static (Error)";
+      return;
+    }
+
+    let loadedAny = false;
+    for (const [key, filename] of Object.entries(filenames)) {
+      const path = `${workingPrefix}${filename}`;
+      try {
+        const response = await fetch(path);
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        const text = await response.text();
+        const parsed = text
+          .split("\n")
+          .filter(line => line.trim().length > 0)
+          .map((line, idx) => {
+            try {
+              return JSON.parse(line);
+            } catch (err) {
+              console.warn(`Skipping malformed line ${idx + 1} in static fetch of ${key}`);
+              return null;
+            }
+          })
+          .filter(Boolean);
+        
+        allResults[key] = parsed;
+        loadedAny = true;
+      } catch (err) {
+        console.error(`Failed to load static results for ${key} from ${path}:`, err);
+      }
+    }
+
+    if (loadedAny) {
+      render(false);
+      connectionLabel.textContent = "Static Mode";
+    } else {
+      connectionLabel.textContent = "Static (Empty)";
+    }
   }
 
   // ── WebSocket ───────────────────────────────────────────────────────
   function connect() {
+    clearTimeout(reconnectTimer);
+    if (ws) {
+      try {
+        ws.close();
+      } catch (e) {}
+    }
+
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
+    
+    // If running under file protocol, location.host is empty, so WebSocket will fail.
+    // Immediately fall back to static mode.
+    if (location.protocol === "file:") {
+      console.log("Running from file protocol, falling back to static mode.");
+      if (!staticMode) {
+        staticMode = true;
+        loadStaticResults();
+      }
+      return;
+    }
+
     ws = new WebSocket(`${proto}//${location.host}`);
 
+    // Set a timeout to check if we can connect. If it takes too long and we haven't connected before, fallback.
+    const fallbackTimeout = setTimeout(() => {
+      if (!hasConnectedOnce && !staticMode) {
+        console.log("WebSocket connection timed out. Falling back to static mode.");
+        staticMode = true;
+        loadStaticResults();
+      }
+    }, 1500);
+
     ws.addEventListener("open", () => {
+      clearTimeout(fallbackTimeout);
+      hasConnectedOnce = true;
+      staticMode = false;
       connectionBar.className = "connected";
       connectionLabel.textContent = "Live";
       clearTimeout(reconnectTimer);
@@ -472,26 +624,56 @@
     ws.addEventListener("message", (evt) => {
       const msg = JSON.parse(evt.data);
       if (msg.type === "snapshot") {
-        allResults = msg.data;
+        allResults[msg.source] = msg.data;
         render(false);
       } else if (msg.type === "append") {
-        allResults.push(...msg.data);
+        if (!allResults[msg.source]) allResults[msg.source] = [];
+        allResults[msg.source].push(...msg.data);
         render(true);
       }
     });
 
     ws.addEventListener("close", () => {
-      connectionBar.className = "disconnected";
-      connectionLabel.textContent = "Reconnecting…";
-      reconnectTimer = setTimeout(connect, RECONNECT_DELAY);
+      clearTimeout(fallbackTimeout);
+      
+      if (!hasConnectedOnce && !staticMode) {
+        console.log("WebSocket connection closed before opening. Falling back to static mode.");
+        staticMode = true;
+        loadStaticResults();
+      }
+
+      if (hasConnectedOnce) {
+        // If we connected once and then disconnected, the server was running but stopped.
+        // Show disconnected status and retry immediately.
+        connectionBar.className = "disconnected";
+        connectionLabel.textContent = "Reconnecting…";
+        reconnectTimer = setTimeout(connect, RECONNECT_DELAY);
+      } else {
+        // If we are in static mode (or never connected), try to reconnect occasionally in the background
+        // unless we are hosted on a standard static GitHub Page environment.
+        const isGitHubPages = location.hostname.endsWith(".github.io");
+        if (!isGitHubPages) {
+          reconnectTimer = setTimeout(connect, 10000);
+        }
+      }
     });
 
-    ws.addEventListener("error", () => ws.close());
+    ws.addEventListener("error", () => {
+      ws.close();
+    });
   }
 
   // ── Filter listeners ───────────────────────────────────────────────
   [filterTask, filterBoundary].forEach((el) => {
     el.addEventListener("change", () => render(false));
+  });
+
+  // ── Pill Filter listeners ──────────────────────────────────────────
+  document.querySelectorAll(".filter-pill").forEach((pill) => {
+    pill.addEventListener("click", () => {
+      pill.classList.toggle("active");
+      render(false);
+    });
   });
 
   // ── Resize ─────────────────────────────────────────────────────────
