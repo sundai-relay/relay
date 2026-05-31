@@ -13,5 +13,11 @@ __pycache__/
 venv/
 .env
 
+# Relay run artifacts (keep the dir via outputs/.gitkeep)
+outputs/*
+!outputs/.gitkeep
+
+# Relay LLM disk cache (temp=0 replay across runs)
+.cache/
 # Relay run artifacts
 outputs
