@@ -32,6 +32,11 @@ _CONFIG = {
 }
 _CLIENT: Optional[WandbInferenceClient] = None
 
+# Output ceiling for the editor/repairer. A 15-20 record JSON doc is small, so
+# this is a *ceiling* (not a target): it trims the generation tail and stops
+# runaway output at temperature 0 without changing well-formed completions.
+_MAX_OUTPUT_TOKENS = 1500
+
 
 def configure(use_mock: Optional[bool] = None, model: str = WEAK_MODEL,
               slip_p: float = 0.5) -> bool:
@@ -88,7 +93,7 @@ def _real_apply_edit(current_doc: str, instruction: str) -> str:
     working = dump(doc) if doc is not None else str(current_doc)
     user = f"DOCUMENT:\n{working}\n\nINSTRUCTION: {instruction}\n\nResulting JSON:"
     raw = _client().chat(_CONFIG["model"], _EDIT_SYSTEM, user,
-                         temperature=0.0, max_tokens=4000)
+                         temperature=0.0, max_tokens=_MAX_OUTPUT_TOKENS)
     parsed = parse_doc(raw)
     return dump(parsed) if parsed is not None else current_doc
 
@@ -115,7 +120,7 @@ def _real_repair_doc(seed_doc, current_doc, instruction, checksum_report) -> str
         f"Checksum report:\n{dump(_repair_view(checksum_report))}\n"
     )
     raw = _client().chat(_CONFIG["model"], system, user,
-                         temperature=0.0, max_tokens=4000)
+                         temperature=0.0, max_tokens=_MAX_OUTPUT_TOKENS)
     parsed = parse_doc(raw)
     return dump(parsed) if parsed is not None else current_doc
 
