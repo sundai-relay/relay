@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Relay — Regrounding Strategy Comparison</title>
+  <meta name="description" content="Realtime comparison of naive, random, and adaptive regrounding strategies for Relay round-trip evaluation" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <!-- ── Connection indicator ──────────────────────────────────── -->
+  <div id="connection-bar">
+    <span id="connection-dot"></span>
+    <span id="connection-label">Connecting…</span>
+    <span id="result-counter">0 results</span>
+  </div>
+
+  <!-- ── Header ────────────────────────────────────────────────── -->
+  <header id="app-header">
+    <div class="header-left">
+      <h1 id="app-title">
+        <svg class="logo-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+        Relay
+      </h1>
+      <p class="header-subtitle">Regrounding Strategy Comparison</p>
+    </div>
+    <div class="header-right">
+      <div class="legend">
+        <span class="legend-item" data-condition="naive"><span class="legend-dot naive"></span>Naive</span>
+        <span class="legend-item" data-condition="always_reground"><span class="legend-dot always"></span>Always Reground</span>
+        <span class="legend-item" data-condition="random_at_budget"><span class="legend-dot random"></span>Random at Budget</span>
+        <span class="legend-item" data-condition="adaptive"><span class="legend-dot adaptive"></span>Adaptive</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ── Leaderboard cards ─────────────────────────────────────── -->
+  <section id="leaderboard">
+    <h2 class="section-title">Leaderboard</h2>
+    <div id="leaderboard-cards"></div>
+  </section>
+
+  <!-- ── Gate verdict ──────────────────────────────────────────── -->
+  <section id="gate-section" class="hidden">
+    <div id="gate-card">
+      <div id="gate-verdict-badge"></div>
+      <div id="gate-details"></div>
+    </div>
+  </section>
+
+  <!-- ── Comparison charts ─────────────────────────────────────── -->
+  <section id="charts-section">
+    <h2 class="section-title">Score Comparison</h2>
+    <div id="charts-grid">
+      <div class="chart-card wide">
+        <h3 class="card-title">Avg Final Score by Condition</h3>
+        <div class="bar-chart" id="score-bars"></div>
+      </div>
+      <div class="chart-card wide">
+        <h3 class="card-title">Score Distribution</h3>
+        <canvas id="distribution-chart"></canvas>
+      </div>
+      <div class="chart-card">
+        <h3 class="card-title">Intervention Rate</h3>
+        <div class="bar-chart" id="intervention-bars"></div>
+      </div>
+      <div class="chart-card">
+        <h3 class="card-title">Cost Efficiency (Score / Cost)</h3>
+        <div class="bar-chart" id="efficiency-bars"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Per-task comparison ───────────────────────────────────── -->
+  <section id="task-section">
+    <h2 class="section-title">Per-Task Breakdown</h2>
+    <div class="filter-row">
+      <div class="filter-group">
+        <label for="filter-task">Task</label>
+        <select id="filter-task"><option value="">All Tasks</option></select>
+      </div>
+      <div class="filter-group">
+        <label for="filter-boundary">Boundary</label>
+        <select id="filter-boundary">
+          <option value="">All Boundaries</option>
+          <option value="0">Boundary 0</option>
+          <option value="1">Boundary 1</option>
+          <option value="2">Boundary 2</option>
+          <option value="3">Boundary 3</option>
+        </select>
+      </div>
+    </div>
+    <div id="task-comparison-grid"></div>
+  </section>
+
+  <!-- ── Detail table ──────────────────────────────────────────── -->
+  <section id="table-section">
+    <h2 class="section-title">Raw Results Feed</h2>
+    <div class="table-wrap">
+      <table id="results-table">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Task</th>
+            <th>Condition</th>
+            <th>Boundary</th>
+            <th>Edit</th>
+            <th>Ops</th>
+            <th>Fidelity Score</th>
+            <th>Risk</th>
+            <th>Drift</th>
+            <th>Intervened</th>
+            <th>Tokens Cum</th>
+          </tr>
+        </thead>
+        <tbody id="results-body"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ── Empty state ───────────────────────────────────────────── -->
+  <div id="empty-state">
+    <div class="empty-icon">📡</div>
+    <p>Waiting for results…</p>
+    <span class="empty-hint">Run <code>python run_all_conditions.py</code> — this dashboard updates in realtime.</span>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

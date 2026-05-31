@@ -1,0 +1,13 @@
+{
+  "name":         "relay--outputs-dashboard",
+  "version":      "0.0.0",
+  "private":      true,
+  "type":         "module",
+  "description":  "Realtime dashboard for Relay evaluation results",
+  "scripts":      { "start": "node server.js" },
+  "dependencies": {
+    "express":  "^4.21.0",
+    "ws":       "^8.18.0",
+    "chokidar": "^4.0.0"
+  }
+}

@@ -125,11 +125,13 @@ def main():
 
 
 def _write_artifacts(log, rows, res, chains, thr, adaptive_total, total_boundaries, adv, args):
-    with open("results.jsonl", "w") as f:
+    import os
+    os.makedirs("outputs", exist_ok=True)
+    with open("outputs/results.jsonl", "w") as f:
         for e in log:
             f.write(json.dumps(e) + "\n")
 
-    with open("leaderboard.md", "w") as f:
+    with open("outputs/leaderboard.md", "w") as f:
         from domain import DOMAIN
         mock_tag = " · OFFLINE MOCK" if __import__("agents").MOCK else ""
         f.write(f"# Relay × DELEGATE52 ({DOMAIN}{mock_tag}) — four-condition leaderboard\n\n")
@@ -154,7 +156,7 @@ def _write_artifacts(log, rows, res, chains, thr, adaptive_total, total_boundari
         if fa - fn > 0.05:
             demos.append((fa - fn, c.sample_id, fn, fa))
     demos.sort(reverse=True)
-    with open("demo_case.md", "w") as f:
+    with open("outputs/demo_case.md", "w") as f:
         f.write("# Demo case — adaptive recovers what naive lost\n\n")
         if demos:
             d, sid, fn, fa = demos[0]
@@ -166,7 +168,7 @@ def _write_artifacts(log, rows, res, chains, thr, adaptive_total, total_boundari
         else:
             f.write("No adaptive-beats-naive chain with margin > 0.05 this run "
                     "(see leaderboard + fallback framing).\n")
-    print(f"\nwrote results.jsonl ({len(log)} rows), leaderboard.md, frontier.png, demo_case.md")
+    print(f"\nwrote outputs/results.jsonl ({len(log)} rows), outputs/leaderboard.md, outputs/frontier.png, outputs/demo_case.md")
     print(f"clean adaptive-fixes-naive chains: {len(demos)}")
 
 
@@ -187,8 +189,10 @@ def _frontier_png(rows):
     ax.set_title("Relay × DELEGATE52 — fidelity / cost frontier")
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
-    fig.savefig("frontier.png", dpi=130)
-    print("wrote frontier.png")
+    import os
+    os.makedirs("outputs", exist_ok=True)
+    fig.savefig("outputs/frontier.png", dpi=130)
+    print("wrote outputs/frontier.png")
 
 
 def _publish_weave(rows, res, chains):
