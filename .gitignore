@@ -4,3 +4,15 @@
 dist
 node_modules
 tmp
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# Relay run artifacts (keep the dir via outputs/.gitkeep)
+outputs/*.jsonl
+outputs/*.png

@@ -1,0 +1,11 @@
+# Mock mode (the acceptance path) needs NOTHING beyond the Python stdlib:
+#     python run.py --substrate mock --condition all --n 5
+#
+# The packages below are only needed for Weave tracing + the real
+# (roundtrip / mcq) substrates that call W&B Inference:
+openai>=1.30
+weave>=0.51
+
+# Optional — only when fleshing out McqSubstrate (data + drift signal):
+# datasets>=2.19
+# sentence-transformers>=2.7
