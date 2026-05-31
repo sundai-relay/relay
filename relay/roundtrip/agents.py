@@ -126,6 +126,7 @@ def _repair_view(report) -> dict:
         "missing_ids": report.get("missing_ids", []),
         "missing_keys": report.get("missing_keys", []),
         "numeric_drift": report.get("numeric_drift", {}),
+        "value_drift": report.get("value_drift", {}),
     }
 
 
