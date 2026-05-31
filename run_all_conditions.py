@@ -23,13 +23,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List
 
 from relay import weave_compat
 from relay.roundtrip import agents
 from relay.roundtrip.runner import run_task
 from relay.roundtrip.tasks import load_tasks
-from relay.wandb_client import WEAK_MODEL
+from relay.wandb_client import OPENAI_MODEL, WEAK_MODEL
 
 CANON = ["naive", "always_reground", "adaptive", "random_at_budget"]
 
@@ -59,14 +60,18 @@ def _aggregate(cond: str, per_task: Dict[str, tuple]) -> dict:
     }
 
 
-def _run_condition(cond, tasks, threshold, random_rate, rng_seed, nrt) -> Dict[str, tuple]:
-    out = {}
-    for t in tasks:
-        rows, final, counts = run_task(t, cond, threshold=threshold,
-                                       random_rate=random_rate, rng_seed=rng_seed,
-                                       num_round_trips=nrt)
-        out[t.task_id] = (rows, final, counts)
-    return out
+def _run_condition(cond, tasks, threshold, random_rate, rng_seed, nrt,
+                   workers: int = 1) -> Dict[str, tuple]:
+    def _one(t):
+        return run_task(t, cond, threshold=threshold, random_rate=random_rate,
+                        rng_seed=rng_seed, num_round_trips=nrt)
+
+    if workers <= 1:  # sequential: the only safe mode for W&B's 429 limit
+        return {t.task_id: _one(t) for t in tasks}
+    # tasks are independent; fan them out (safe for OpenAI's concurrency).
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = {ex.submit(_one, t): t for t in tasks}
+        return {futs[f].task_id: f.result() for f in futs}
 
 
 # --------------------------------------------------------------------------- #
@@ -86,16 +91,32 @@ def main() -> None:
                    help="subset of: " + " ".join(CANON))
     p.add_argument("--slip-p", type=float, default=0.6,
                    help="(mock) probability an edit loses something")
-    p.add_argument("--model", default=WEAK_MODEL)
+    p.add_argument("--model", default=None,
+                   help="model id; defaults to the weak Llama (wandb) or "
+                        f"{OPENAI_MODEL} (openai)")
+    p.add_argument("--provider", choices=("wandb", "openai"), default="wandb",
+                   help="inference backend for LIVE runs")
+    p.add_argument("--workers", type=int, default=1,
+                   help="parallel tasks per condition (keep at 1 for wandb; "
+                        "openai tolerates higher concurrency)")
+    p.add_argument("--no-weave", action="store_true",
+                   help="skip Weave tracing (faster; recommended with --workers)")
     mode = p.add_mutually_exclusive_group()
     mode.add_argument("--mock", action="store_true", help="force the mock editor")
-    mode.add_argument("--live", action="store_true", help="force real W&B Inference")
+    mode.add_argument("--live", action="store_true", help="force real inference")
     p.add_argument("--out-dir", default="outputs")
     args = p.parse_args()
 
+    model = args.model or (OPENAI_MODEL if args.provider == "openai" else WEAK_MODEL)
+    workers = max(1, args.workers)
+    if args.provider == "wandb" and workers > 1:
+        print("[relay] wandb 429s on concurrency; forcing --workers 1")
+        workers = 1
+
     use_mock = True if args.mock else (False if args.live else None)
-    use_mock = agents.configure(use_mock=use_mock, model=args.model, slip_p=args.slip_p)
-    weave_active = weave_compat.maybe_init()
+    use_mock = agents.configure(use_mock=use_mock, model=model,
+                                slip_p=args.slip_p, provider=args.provider)
+    weave_active = False if args.no_weave else weave_compat.maybe_init()
 
     requested = [c for c in CANON if c in set(args.conditions)]
     unknown = set(args.conditions) - set(CANON)
@@ -106,8 +127,9 @@ def main() -> None:
         return
 
     tasks = load_tasks(args.n, args.rng_seed)
+    backend = "MOCK" if use_mock else f"LIVE/{args.provider}:{model}"
     print(f"[relay] roundtrip: tasks={len(tasks)} round_trips={args.num_round_trips} "
-          f"threshold={args.threshold} mode={'MOCK' if use_mock else 'LIVE'} "
+          f"threshold={args.threshold} mode={backend} workers={workers} "
           f"weave={'on' if weave_active else 'off'}")
 
     results: Dict[str, Dict[str, tuple]] = {}
@@ -116,7 +138,8 @@ def main() -> None:
     for cond in ("naive", "always_reground", "adaptive"):
         if cond in requested or (cond == "adaptive" and "random_at_budget" in requested):
             results[cond] = _run_condition(cond, tasks, args.threshold, None,
-                                           args.random_seed, args.num_round_trips)
+                                           args.random_seed, args.num_round_trips,
+                                           workers=workers)
 
     if "random_at_budget" in requested:
         adaptive_summary = _aggregate("adaptive", results["adaptive"])
@@ -125,7 +148,7 @@ def main() -> None:
               f"-> random-at-budget matches it")
         results["random_at_budget"] = _run_condition(
             "random_at_budget", tasks, args.threshold, random_rate,
-            args.random_seed, args.num_round_trips)
+            args.random_seed, args.num_round_trips, workers=workers)
 
     # keep only requested conditions in the report (adaptive may have been run
     # only to budget random).

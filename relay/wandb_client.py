@@ -20,29 +20,46 @@ from .weave_compat import op
 STRONG_MODEL = "meta-llama/Llama-3.3-70B-Instruct"
 WEAK_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
 BASE_URL = "https://api.inference.wandb.ai/v1"
+OPENAI_BASE_URL = "https://api.openai.com/v1"
+OPENAI_MODEL = "gpt-4o-mini"
 
 
 class WandbInferenceClient:
+    """OpenAI-compatible client. ``provider="wandb"`` (default) hits W&B
+    Inference; ``provider="openai"`` hits api.openai.com with $OPENAI_API_KEY.
+    Both speak the same chat-completions API, so only auth/base_url differ.
+    OpenAI tolerates concurrency, so the runner may call ``chat`` from a pool;
+    W&B 429s on concurrency, so for that provider keep calls sequential."""
+
     def __init__(self, api_key: str | None = None, project: str | None = None,
-                 base_url: str = BASE_URL, max_retries: int = 6):
-        self.api_key = api_key or os.environ.get("WANDB_API_KEY")
-        self.project = project or os.environ.get("WANDB_PROJECT")
+                 base_url: str | None = None, max_retries: int = 6,
+                 provider: str = "wandb"):
+        self.provider = provider
+        if provider == "openai":
+            self.api_key = api_key or os.environ.get("OPENAI_API_KEY")
+            self.project = None  # OpenAI "project" is a proj_… id, not a W&B name
+            base_url = base_url or OPENAI_BASE_URL
+            key_env = "OPENAI_API_KEY"
+        else:
+            self.api_key = api_key or os.environ.get("WANDB_API_KEY")
+            self.project = project or os.environ.get("WANDB_PROJECT")
+            base_url = base_url or BASE_URL
+            key_env = "WANDB_API_KEY"
         if not self.api_key:
             raise RuntimeError(
-                "WANDB_API_KEY not set. Real substrates need W&B Inference creds; "
-                "use `--substrate mock` for the no-key path."
+                f"{key_env} not set. Real substrates need inference creds; "
+                "use `--mock` for the no-key path."
             )
         try:
             import openai  # lazy: mock mode must not require openai
         except ImportError as e:  # pragma: no cover
-            raise RuntimeError("`pip install openai` to use W&B Inference.") from e
+            raise RuntimeError("`pip install openai` to use inference.") from e
 
-        self.client = openai.OpenAI(
-            base_url=base_url,
-            api_key=self.api_key,
-            project=self.project,
-            default_headers={"OpenAI-Project": self.project or ""},
-        )
+        kwargs = {"base_url": base_url, "api_key": self.api_key}
+        if self.project:  # W&B path: scope the call to the project
+            kwargs["project"] = self.project
+            kwargs["default_headers"] = {"OpenAI-Project": self.project}
+        self.client = openai.OpenAI(**kwargs)
         self.max_retries = max_retries
 
     @op()
