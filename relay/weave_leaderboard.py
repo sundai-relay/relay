@@ -8,19 +8,30 @@ Pattern (per the W&B Inference docs): one ``weave.Evaluation`` per condition
 over the same episode dataset + a reconstruction/exact-match scorer, then a
 ``leaderboard.Leaderboard`` with one column per condition's ``fidelity.mean``.
 
+The evaluations wrap *already-computed* results — nothing is re-run. This avoids
+doubling computation/API costs and sidesteps ``asyncio.run()`` issues when an
+event loop is already active (e.g. inside Weave tracing or Jupyter).
+
 Everything is wrapped in try/except so a Weave/version mismatch can never break
 the actual run — it just prints a skip notice.
 """
 
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Any, Dict, List
 
 from . import weave_compat
 
 
 def maybe_publish(results: Dict[str, List[dict]], substrate, episodes,
                   threshold: float = 0.4, seed: int = 0):
+    """Publish pre-computed condition results as Weave Evaluations + Leaderboard.
+
+    ``results`` is ``{condition_name: [per_hop_row_dicts, ...]}``, as returned
+    by ``run_conditions()``.  Each row has at least ``episode_id`` and ``score``.
+    We aggregate the last-hop score per episode and surface it as the
+    ``fidelity`` metric in each Evaluation.
+    """
     if not weave_compat.is_active():
         return None
     weave = weave_compat.weave_module()
@@ -30,46 +41,54 @@ def maybe_publish(results: Dict[str, List[dict]], substrate, episodes,
     try:
         import asyncio
 
-        from .conductor import (ADAPTIVE, ALWAYS, NAIVE, RANDOM, AdaptivePolicy,
-                                AlwaysPolicy, NaivePolicy, RandomAtBudgetPolicy)
-        from .conditions import (per_episode_intervention_counts, run_condition,
-                                 run_episode)
+        from .conductor import ADAPTIVE, ALWAYS, NAIVE, RANDOM
 
-        ep_by_id = {e.id: e for e in episodes}
-        dataset = [{"episode_id": e.id} for e in episodes]
+        # Build a lookup: condition -> {episode_id: final_score}.
+        # Each condition's rows are ordered by episode & hop; the *last* row per
+        # episode_id carries the final per-hop score (== episode fidelity).
+        def _final_scores(rows: List[dict]) -> Dict[str, float]:
+            scores: Dict[str, float] = {}
+            for r in rows:
+                scores[r["episode_id"]] = r["score"]  # last write wins
+            return scores
+
+        ep_ids = [e.id for e in episodes]
+        dataset = [{"episode_id": eid} for eid in ep_ids]
 
         @weave.op()
         def reconstruction_scorer(episode_id: str, output: dict) -> dict:
-            ep = ep_by_id[episode_id]
-            return {"fidelity": float(ep.score(output["final_state"]))}
+            return {"fidelity": output["score"]}
 
-        # random-at-budget needs adaptive's observed per-episode counts.
-        adaptive_rows = results.get(ADAPTIVE)
-        if adaptive_rows is None:
-            adaptive_rows = run_condition(substrate, episodes, ADAPTIVE,
-                                          AdaptivePolicy(threshold))
-        budget = per_episode_intervention_counts(adaptive_rows)
-
-        policies = [
-            (NAIVE, NaivePolicy()),
-            (ALWAYS, AlwaysPolicy()),
-            (ADAPTIVE, AdaptivePolicy(threshold)),
-            (RANDOM, RandomAtBudgetPolicy(budget, seed=seed)),
-        ]
-
-        def make_predict(policy):
-            @weave.op()
-            def predict(episode_id: str) -> dict:
-                ep = ep_by_id[episode_id]
-                final_state, _ = run_episode(substrate, ep, policy)
-                return {"final_state": final_state}
-            return predict
-
+        canonical_order = [NAIVE, ALWAYS, ADAPTIVE, RANDOM]
         evals = []
-        for cond, policy in policies:
-            evaluation = weave.Evaluation(name=f"relay-{cond}", dataset=dataset,
-                                          scorers=[reconstruction_scorer])
-            asyncio.run(evaluation.evaluate(make_predict(policy)))
+        for cond in canonical_order:
+            if cond not in results:
+                continue
+            finals = _final_scores(results[cond])
+
+            def make_predict(cond_finals: Dict[str, float]):
+                @weave.op()
+                def predict(episode_id: str) -> dict:
+                    return {"score": cond_finals.get(episode_id, 0.0)}
+                return predict
+
+            evaluation = weave.Evaluation(
+                name=f"relay-{cond}",
+                dataset=dataset,
+                scorers=[reconstruction_scorer],
+            )
+            # Use get_or_create_event_loop pattern to avoid
+            # "RuntimeError: This event loop is already running".
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+
+            if loop and loop.is_running():
+                import nest_asyncio  # type: ignore
+                nest_asyncio.apply()
+
+            asyncio.run(evaluation.evaluate(make_predict(finals)))
             evals.append((cond, evaluation))
 
         _publish_leaderboard(weave, evals)
