@@ -134,6 +134,9 @@ def main() -> None:
 
     os.makedirs(args.out_dir, exist_ok=True)
     _write_jsonl(results, report_conds, os.path.join(args.out_dir, "results.jsonl"))
+    # Sidecar per-task summary carries final_doc (the lean trace strips it) so the
+    # standalone `python -m relay.weave_leaderboard` re-score has a document to score.
+    _write_task_summary(results, report_conds, os.path.join(args.out_dir, "task_summary.jsonl"))
     _write_leaderboard_md(summaries, os.path.join(args.out_dir, "leaderboard.md"))
     _print_leaderboard(summaries)
     _maybe_gate(summaries)
@@ -141,7 +144,21 @@ def main() -> None:
     _write_demo_case(results, report_conds, os.path.join(args.out_dir, "demo_case.md"))
 
     print(f"[relay] outputs -> {args.out_dir}/ "
-          "(results.jsonl, leaderboard.md, frontier.*, demo_case.md)")
+          "(results.jsonl, task_summary.jsonl, leaderboard.md, frontier.*, demo_case.md)")
+
+    # Publish a Weave Evaluation + Leaderboard from the in-memory results (full
+    # final_doc fidelity, no extra model calls). A failure here never destroys the
+    # run's other outputs.
+    try:
+        from relay.weave_leaderboard import (from_run_results, run_evaluations,
+                                             publish_leaderboard)
+        results_map = from_run_results(results, report_conds)
+        evaluation, _ = run_evaluations(tasks, results_map)
+        if evaluation is not None:
+            publish_leaderboard(evaluation)
+    except Exception as e:
+        print(f"[relay] leaderboard step failed, run outputs intact: "
+              f"{type(e).__name__}: {e}")
 
 
 # --------------------------------------------------------------------------- #
@@ -153,6 +170,23 @@ def _write_jsonl(results, conds, path):
                     lean = {k: v for k, v in r.items()
                             if k not in ("current_doc", "score_components", "instruction")}
                     f.write(json.dumps(lean) + "\n")
+
+
+def _write_task_summary(results, conds, path):
+    """One row per (condition, task): keeps final_doc so the leaderboard tool can
+    re-score from disk without re-running the workflow."""
+    with open(path, "w") as f:
+        for cond in conds:
+            for _tid, (_rows, final, counts) in results[cond].items():
+                f.write(json.dumps({
+                    "condition": cond,
+                    "task_id": _tid,
+                    "final_doc": counts["final_doc"],
+                    "interventions": counts["interventions"],
+                    "n_steps": counts["steps"],
+                    "cost_proxy": counts["cost_proxy"],
+                    "final_score": final["score"],
+                }) + "\n")
 
 
 def _print_leaderboard(summaries):
