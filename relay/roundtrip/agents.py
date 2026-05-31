@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import os
 import random
+import threading
 from typing import Optional
 
 from ..wandb_client import WEAK_MODEL, WandbInferenceClient
@@ -29,19 +30,27 @@ _CONFIG = {
     "use_mock": True,
     "model": WEAK_MODEL,
     "slip_p": 0.5,   # mock: probability a forward/backward edit loses something
+    "provider": "wandb",  # "wandb" (default) or "openai"
 }
 _CLIENT: Optional[WandbInferenceClient] = None
+_CLIENT_LOCK = threading.Lock()  # _client() may be called from a worker pool
+
+
+def _key_present(provider: str) -> bool:
+    env = "OPENAI_API_KEY" if provider == "openai" else "WANDB_API_KEY"
+    return bool(os.environ.get(env))
 
 
 def configure(use_mock: Optional[bool] = None, model: str = WEAK_MODEL,
-              slip_p: float = 0.5) -> bool:
-    """Set the agent mode. If use_mock is None, auto-detect from WANDB_API_KEY.
-    Returns the resolved use_mock value."""
+              slip_p: float = 0.5, provider: str = "wandb") -> bool:
+    """Set the agent mode. If use_mock is None, auto-detect from the provider's
+    key env var. Returns the resolved use_mock value."""
     if use_mock is None:
-        use_mock = not bool(os.environ.get("WANDB_API_KEY"))
+        use_mock = not _key_present(provider)
     _CONFIG["use_mock"] = use_mock
     _CONFIG["model"] = model
     _CONFIG["slip_p"] = slip_p
+    _CONFIG["provider"] = provider
     return use_mock
 
 
@@ -52,7 +61,9 @@ def is_mock() -> bool:
 def _client() -> WandbInferenceClient:
     global _CLIENT
     if _CLIENT is None:
-        _CLIENT = WandbInferenceClient()
+        with _CLIENT_LOCK:  # double-checked: only build the client once
+            if _CLIENT is None:
+                _CLIENT = WandbInferenceClient(provider=_CONFIG["provider"])
     return _CLIENT
 
 

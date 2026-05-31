@@ -23,13 +23,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict
 
 from relay import weave_compat
 from relay.roundtrip import agents
 from relay.roundtrip.runner import run_task
 from relay.roundtrip.tasks import load_tasks
-from relay.wandb_client import WEAK_MODEL
+from relay.wandb_client import OPENAI_MODEL, WEAK_MODEL
 
 CANON = ["naive", "always_reground", "adaptive", "random_at_budget"]
 
@@ -60,15 +61,27 @@ def _aggregate(cond: str, per_task: Dict[str, tuple]) -> dict:
 
 
 def _run_condition(cond, tasks, threshold, random_rate, rng_seed, nrt,
-                   sink=None) -> Dict[str, tuple]:
-    out = {}
-    for t in tasks:
-        rows, final, counts = run_task(t, cond, threshold=threshold,
-                                       random_rate=random_rate, rng_seed=rng_seed,
-                                       num_round_trips=nrt)
-        out[t.task_id] = (rows, final, counts)
-        if sink is not None:
-            sink(cond, rows)  # append this task-run to the trace as it completes
+                   sink=None, workers: int = 1) -> Dict[str, tuple]:
+    def _one(t):
+        return run_task(t, cond, threshold=threshold, random_rate=random_rate,
+                        rng_seed=rng_seed, num_round_trips=nrt)
+
+    out: Dict[str, tuple] = {}
+    if workers <= 1:  # sequential: the only safe mode for W&B's 429 limit
+        for t in tasks:
+            out[t.task_id] = _one(t)
+            if sink is not None:
+                sink(cond, out[t.task_id][0])  # append as each task completes
+        return out
+
+    # tasks are independent; fan them out (safe for OpenAI's concurrency).
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = {ex.submit(_one, t): t for t in tasks}
+        for f in as_completed(futs):
+            t = futs[f]
+            out[t.task_id] = f.result()
+            if sink is not None:
+                sink(cond, out[t.task_id][0])
     return out
 
 
@@ -89,16 +102,32 @@ def main() -> None:
                    help="subset of: " + " ".join(CANON))
     p.add_argument("--slip-p", type=float, default=0.6,
                    help="(mock) probability an edit loses something")
-    p.add_argument("--model", default=WEAK_MODEL)
+    p.add_argument("--model", default=None,
+                   help="model id; defaults to the weak Llama (wandb) or "
+                        f"{OPENAI_MODEL} (openai)")
+    p.add_argument("--provider", choices=("wandb", "openai"), default="wandb",
+                   help="inference backend for LIVE runs")
+    p.add_argument("--workers", type=int, default=1,
+                   help="parallel tasks per condition (keep at 1 for wandb; "
+                        "openai tolerates higher concurrency)")
+    p.add_argument("--no-weave", action="store_true",
+                   help="skip Weave tracing (faster; recommended with --workers)")
     mode = p.add_mutually_exclusive_group()
     mode.add_argument("--mock", action="store_true", help="force the mock editor")
-    mode.add_argument("--live", action="store_true", help="force real W&B Inference")
+    mode.add_argument("--live", action="store_true", help="force real inference")
     p.add_argument("--out-dir", default="outputs")
     args = p.parse_args()
 
+    model = args.model or (OPENAI_MODEL if args.provider == "openai" else WEAK_MODEL)
+    workers = max(1, args.workers)
+    if args.provider == "wandb" and workers > 1:
+        print("[relay] wandb 429s on concurrency; forcing --workers 1")
+        workers = 1
+
     use_mock = True if args.mock else (False if args.live else None)
-    use_mock = agents.configure(use_mock=use_mock, model=args.model, slip_p=args.slip_p)
-    weave_active = weave_compat.maybe_init()
+    use_mock = agents.configure(use_mock=use_mock, model=model,
+                                slip_p=args.slip_p, provider=args.provider)
+    weave_active = False if args.no_weave else weave_compat.maybe_init()
 
     requested = [c for c in CANON if c in set(args.conditions)]
     unknown = set(args.conditions) - set(CANON)
@@ -109,8 +138,9 @@ def main() -> None:
         return
 
     tasks = load_tasks(args.n, args.rng_seed)
+    backend = "MOCK" if use_mock else f"LIVE/{args.provider}:{model}"
     print(f"[relay] roundtrip: tasks={len(tasks)} round_trips={args.num_round_trips} "
-          f"threshold={args.threshold} mode={'MOCK' if use_mock else 'LIVE'} "
+          f"threshold={args.threshold} mode={backend} workers={workers} "
           f"weave={'on' if weave_active else 'off'}")
 
     # report_conds is known up front; adaptive may run only to budget random, in
@@ -141,7 +171,7 @@ def main() -> None:
             if cond in requested or (cond == "adaptive" and "random_at_budget" in requested):
                 results[cond] = _run_condition(cond, tasks, args.threshold, None,
                                                args.random_seed, args.num_round_trips,
-                                               _sink)
+                                               _sink, workers=workers)
 
         if "random_at_budget" in requested:
             adaptive_summary = _aggregate("adaptive", results["adaptive"])
@@ -150,10 +180,14 @@ def main() -> None:
                   f"-> random-at-budget matches it")
             results["random_at_budget"] = _run_condition(
                 "random_at_budget", tasks, args.threshold, random_rate,
-                args.random_seed, args.num_round_trips, _sink)
+                args.random_seed, args.num_round_trips, _sink, workers=workers)
 
     summaries = [_aggregate(c, results[c]) for c in report_conds]
 
+    # Sidecar per-task summary carries final_doc (the lean trace strips it) so the
+    # standalone `python -m relay.weave_leaderboard` can re-score from disk.
+    _write_task_summary(results, report_conds,
+                        os.path.join(args.out_dir, "task_summary.jsonl"))
     _write_leaderboard_md(summaries, os.path.join(args.out_dir, "leaderboard.md"))
     _print_leaderboard(summaries)
     _maybe_gate(summaries)
@@ -161,9 +195,23 @@ def main() -> None:
     _write_demo_case(results, report_conds, os.path.join(args.out_dir, "demo_case.md"))
 
     print(f"[relay] outputs -> {args.out_dir}/ "
-          "(results.jsonl, leaderboard.md, frontier.*, demo_case.md)")
+          "(results.jsonl, task_summary.jsonl, leaderboard.md, frontier.*, demo_case.md)")
 
-    _maybe_publish_weave(results, report_conds)
+    # Publish a Weave Evaluation + Leaderboard from the in-memory results (full
+    # final_doc fidelity, pure lookup, no extra model calls). Only with live Weave;
+    # a failure here never destroys the run's other outputs.
+    if weave_active:
+        try:
+            from relay.weave_leaderboard import (from_run_results,
+                                                 publish_leaderboard,
+                                                 run_evaluations)
+            results_map = from_run_results(results, report_conds)
+            evaluation, _ = run_evaluations(tasks, results_map)
+            if evaluation is not None:
+                publish_leaderboard(evaluation)
+        except Exception as e:
+            print(f"[relay] leaderboard publish failed, run outputs intact: "
+                  f"{type(e).__name__}: {e}")
 
 
 # --------------------------------------------------------------------------- #
@@ -174,6 +222,23 @@ _LEAN_DROP = ("current_doc", "score_components", "instruction")
 
 def _lean_row(r: dict) -> dict:
     return {k: v for k, v in r.items() if k not in _LEAN_DROP}
+
+
+def _write_task_summary(results, conds, path):
+    """One row per (condition, task): keeps final_doc so the leaderboard tool can
+    re-score from disk without re-running the workflow."""
+    with open(path, "w") as f:
+        for cond in conds:
+            for tid, (_rows, final, counts) in results[cond].items():
+                f.write(json.dumps({
+                    "condition": cond,
+                    "task_id": tid,
+                    "final_doc": counts["final_doc"],
+                    "interventions": counts["interventions"],
+                    "n_steps": counts["steps"],
+                    "cost_proxy": counts["cost_proxy"],
+                    "final_score": final["score"],
+                }) + "\n")
 
 
 def _print_leaderboard(summaries):
@@ -238,157 +303,6 @@ def _write_frontier(summaries, path):
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
     fig.savefig(path, dpi=120)
-
-
-def _write_demo_case(results, conds, path):
-    if "naive" not in results or "adaptive" not in results:
-        return
-    # task with the largest adaptive-over-naive gap.
-    best_tid, best_gap = None, -1.0
-    for tid in results["naive"]:
-        na = results["naive"][tid][1]["score"]
-        ad = results["adaptive"][tid][1]["score"]
-        if ad - na > best_gap:
-            best_gap, best_tid = ad - na, tid
-    if best_tid is None:
-        return
-
-    na_rows, na_final, _ = results["naive"][best_tid]
-    ad_rows, ad_final, _ = results["adaptive"][best_tid]
-    al_final = results.get("always_reground", {}).get(best_tid, (None, {"score": float("nan")}, None))[1]
-
-    # the clearest repair moment in adaptive: highest-risk step that intervened.
-    spike = max((r for r in ad_rows if r["intervened"]),
-                key=lambda r: r["runtime_risk"], default=None)
-
-    lines = [
-        f"# Relay demo case — `{best_tid}`", "",
-        f"Adaptive beats naive on this task by **{best_gap:+.3f}** structural score.", "",
-        "| condition | final score | id_f1 | scalar_fidelity |",
-        "|---|---|---|---|",
-        f"| naive | {na_final['score']:.3f} | {na_final['id_f1']:.3f} | {na_final['scalar_value_fidelity']:.3f} |",
-        f"| adaptive | {ad_final['score']:.3f} | {ad_final['id_f1']:.3f} | {ad_final['scalar_value_fidelity']:.3f} |",
-        f"| always_reground | {al_final['score']:.3f} | {al_final.get('id_f1', float('nan')):.3f} | {al_final.get('scalar_value_fidelity', float('nan')):.3f} |",
-        "",
-        "## Where naive silently lost fidelity",
-        "",
-        "Per-step runtime risk under **naive** (no repairs):", "",
-        "| round | step | risk | id_loss | key_loss | missing_ids |",
-        "|---|---|---|---|---|---|",
-    ]
-    for r in na_rows:
-        lines.append(f"| {r['round_trip_index']} | {r['step_type']} | "
-                     f"{r['runtime_risk']:.3f} | {r['id_loss_rate']:.3f} | "
-                     f"{r['required_key_loss_rate']:.3f} | "
-                     f"{','.join(r['missing_ids']) or '-'} |")
-    lines += ["", "## The adaptive repair", ""]
-    if spike is not None:
-        lines += [
-            f"Risk spiked to **{spike['runtime_risk']:.3f}** at round "
-            f"{spike['round_trip_index']} ({spike['step_type']}, edit "
-            f"`{spike['edit_name']}`); the Conductor fired a targeted repair "
-            f"(risk_after = {spike['risk_after']:.3f}).",
-        ]
-    else:
-        lines += ["Adaptive did not need to intervene on this task."]
-    lines += ["", "_Generated by run_all_conditions.py; gold answers were used "
-                  "only for the final score, never by the runtime policy._", ""]
-    with open(path, "w") as f:
-        f.write("\n".join(lines) + "\n")
-
-
-def _maybe_publish_weave(results, conds):
-    """Publish pre-computed roundtrip results as Weave Evaluations + Leaderboard.
-
-    Safe no-op when Weave is not initialized (missing creds or package).
-    Wraps already-computed results — nothing is re-run.
-    """
-    if not weave_compat.is_active():
-        return
-    weave = weave_compat.weave_module()
-    if weave is None:
-        return
-
-    try:
-        import asyncio
-
-        all_task_ids = sorted({tid for cond in conds if cond in results
-                               for tid in results[cond]})
-        dataset = [{"task_id": tid} for tid in all_task_ids]
-
-        @weave.op()
-        def roundtrip_scorer(task_id: str, output: dict) -> dict:
-            return {"fidelity": output["score"]}
-
-        evals = []
-        for cond in conds:
-            if cond not in results:
-                continue
-            per_task = results[cond]
-
-            def make_predict(cond_per_task):
-                @weave.op()
-                def predict(task_id: str) -> dict:
-                    _rows, final, counts = cond_per_task[task_id]
-                    return {
-                        "score": final["score"],
-                        "interventions": counts["interventions"],
-                        "cost_proxy": counts["cost_proxy"],
-                    }
-
-                return predict
-
-            evaluation = weave.Evaluation(
-                name=f"relay-roundtrip-{cond}",
-                dataset=dataset,
-                scorers=[roundtrip_scorer],
-            )
-            asyncio.run(evaluation.evaluate(make_predict(per_task)))
-            evals.append((cond, evaluation))
-
-        # Attempt to publish a Leaderboard grouping all conditions.
-        try:
-            from weave.flow import leaderboard as lb
-        except Exception:
-            print("[weave] leaderboard module unavailable; evaluations still logged.")
-            return
-
-        try:
-            from weave.trace.ref_util import get_ref
-        except Exception:
-            get_ref = None
-
-        columns = []
-        for cond, evaluation in evals:
-            ref = None
-            if get_ref is not None:
-                try:
-                    ref = get_ref(evaluation).uri()
-                except Exception:
-                    ref = None
-            if ref is None:
-                continue
-            columns.append(lb.LeaderboardColumn(
-                evaluation_object_ref=str(ref),
-                scorer_name="roundtrip_scorer",
-                summary_metric_path="fidelity.mean",
-            ))
-
-        if columns:
-            spec = lb.Leaderboard(
-                name="Relay \u2014 round-trip (4 conditions)",
-                description="naive / always_reground / adaptive / random_at_budget "
-                            "over the same round-trip tasks.",
-                columns=columns,
-            )
-            weave.publish(spec)
-            print("[weave] published Evaluations + Leaderboard.")
-        else:
-            print("[weave] could not resolve evaluation refs; leaderboard skipped "
-                  "(evaluations still logged).")
-
-    except Exception as e:
-        print(f"[weave] Evaluation publish skipped ({type(e).__name__}: {e}).")
 
 
 if __name__ == "__main__":
