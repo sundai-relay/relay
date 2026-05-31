@@ -4,3 +4,20 @@
 dist
 node_modules
 tmp
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# Relay run artifacts
+outputs/*
+!outputs/.gitkeep
+
+# Relay LLM disk cache (temp=0 replay across runs)
+.cache/
+# Relay run artifacts
+outputs

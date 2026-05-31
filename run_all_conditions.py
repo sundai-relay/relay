@@ -1,0 +1,309 @@
+#!/usr/bin/env python3
+"""Relay — round-trip four-condition runner (the locked-spec entry point).
+
+Runs naive / always_reground / adaptive / random_at_budget over the SAME tasks,
+edit sequence, round-trip count, and model settings (temperature 0). Only the
+intervention policy changes. Adaptive runs before random-at-budget so random can
+match adaptive's *observed* intervention rate.
+
+No API key -> a deterministic mock editor/repairer runs (GREEN, zero credits).
+With WANDB_API_KEY + WANDB_PROJECT -> real W&B Inference + Weave tracing.
+
+Examples
+--------
+    # The naive-vs-always gate (offline, no key):
+    python run_all_conditions.py --n 5 --conditions naive always_reground
+
+    # Full four-condition run:
+    python run_all_conditions.py --n 20
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Dict
+
+from relay import weave_compat
+from relay.roundtrip import agents
+from relay.roundtrip.runner import run_task
+from relay.roundtrip.tasks import load_tasks
+from relay.wandb_client import OPENAI_MODEL, WEAK_MODEL
+
+CANON = ["naive", "always_reground", "adaptive", "random_at_budget"]
+
+
+# --------------------------------------------------------------------------- #
+def _aggregate(cond: str, per_task: Dict[str, tuple]) -> dict:
+    scores, interventions, steps, costs = [], [], 0, []
+    for _tid, (rows, final, counts) in per_task.items():
+        scores.append(final["score"])
+        interventions.append(counts["interventions"])
+        steps += counts["steps"]
+        costs.append(counts["cost_proxy"])
+    n = max(1, len(per_task))
+    total_int = sum(interventions)
+    avg_score = sum(scores) / n
+    avg_cost = sum(costs) / n
+    return {
+        "condition": cond,
+        "avg_score": avg_score,
+        "avg_interventions": total_int / n,
+        "intervention_rate": (total_int / steps) if steps else 0.0,
+        "cost_proxy": avg_cost,
+        "score_per_cost": (avg_score / avg_cost) if avg_cost else 0.0,
+        "n_tasks": len(per_task),
+        "total_interventions": total_int,
+        "total_steps": steps,
+    }
+
+
+def _run_condition(cond, tasks, threshold, random_rate, rng_seed, nrt,
+                   sink=None, workers: int = 1) -> Dict[str, tuple]:
+    def _one(t):
+        return run_task(t, cond, threshold=threshold, random_rate=random_rate,
+                        rng_seed=rng_seed, num_round_trips=nrt)
+
+    out: Dict[str, tuple] = {}
+    if workers <= 1:  # sequential: the only safe mode for W&B's 429 limit
+        for t in tasks:
+            out[t.task_id] = _one(t)
+            if sink is not None:
+                sink(cond, out[t.task_id][0])  # append as each task completes
+        return out
+
+    # tasks are independent; fan them out (safe for OpenAI's concurrency).
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = {ex.submit(_one, t): t for t in tasks}
+        for f in as_completed(futs):
+            t = futs[f]
+            out[t.task_id] = f.result()
+            if sink is not None:
+                sink(cond, out[t.task_id][0])
+    return out
+
+
+# --------------------------------------------------------------------------- #
+def main() -> None:
+    p = argparse.ArgumentParser(description="Relay round-trip four-condition runner")
+    p.add_argument("--n", type=int, default=20, help="number of tasks")
+    p.add_argument("--rng-seed", type=int, default=42, help="task-generation seed")
+    p.add_argument("--threshold", type=float, default=0.008,
+                   help="adaptive risk threshold. NOTE: the checksum risk is "
+                        "small-magnitude (a single dropped record among ~17 is "
+                        "~0.02), so this is much lower than a 0-1 'confidence' "
+                        "threshold. Tuned for ~25-35%% interventions.")
+    p.add_argument("--num-round-trips", type=int, default=4)
+    p.add_argument("--random-seed", type=int, default=123,
+                   help="seed for random-at-budget decisions")
+    p.add_argument("--conditions", nargs="+", default=CANON,
+                   help="subset of: " + " ".join(CANON))
+    p.add_argument("--slip-p", type=float, default=0.6,
+                   help="(mock) probability an edit loses something")
+    p.add_argument("--model", default=None,
+                   help="model id; defaults to the weak Llama (wandb) or "
+                        f"{OPENAI_MODEL} (openai)")
+    p.add_argument("--provider", choices=("wandb", "openai"), default="wandb",
+                   help="inference backend for LIVE runs")
+    p.add_argument("--workers", type=int, default=1,
+                   help="parallel tasks per condition (keep at 1 for wandb; "
+                        "openai tolerates higher concurrency)")
+    p.add_argument("--no-weave", action="store_true",
+                   help="skip Weave tracing (faster; recommended with --workers)")
+    mode = p.add_mutually_exclusive_group()
+    mode.add_argument("--mock", action="store_true", help="force the mock editor")
+    mode.add_argument("--live", action="store_true", help="force real inference")
+    p.add_argument("--out-dir", default="outputs")
+    args = p.parse_args()
+
+    model = args.model or (OPENAI_MODEL if args.provider == "openai" else WEAK_MODEL)
+    workers = max(1, args.workers)
+    if args.provider == "wandb" and workers > 1:
+        print("[relay] wandb 429s on concurrency; forcing --workers 1")
+        workers = 1
+
+    use_mock = True if args.mock else (False if args.live else None)
+    use_mock = agents.configure(use_mock=use_mock, model=model,
+                                slip_p=args.slip_p, provider=args.provider)
+    weave_active = False if args.no_weave else weave_compat.maybe_init()
+
+    requested = [c for c in CANON if c in set(args.conditions)]
+    unknown = set(args.conditions) - set(CANON)
+    if unknown:
+        print(f"[relay] ignoring unknown conditions: {sorted(unknown)}")
+    if not requested:
+        print(f"[relay] no valid conditions in {args.conditions}; choose from {CANON}")
+        return
+
+    tasks = load_tasks(args.n, args.rng_seed)
+    backend = "MOCK" if use_mock else f"LIVE/{args.provider}:{model}"
+    print(f"[relay] roundtrip: tasks={len(tasks)} round_trips={args.num_round_trips} "
+          f"threshold={args.threshold} mode={backend} workers={workers} "
+          f"weave={'on' if weave_active else 'off'}")
+
+    # report_conds is known up front; adaptive may run only to budget random, in
+    # which case it is NOT part of the report (nor the incremental trace).
+    report_conds = [c for c in CANON if c in requested]
+
+    os.makedirs(args.out_dir, exist_ok=True)
+    results_path = os.path.join(args.out_dir, "results.jsonl")
+    results: Dict[str, Dict[str, tuple]] = {}
+
+    # Incremental trace: append each task-run as it completes and flush, so a
+    # killed run still leaves a usable partial results.jsonl. (It used to be
+    # written only at the very end -> all-or-nothing; a kill forfeited everything.)
+    with open(results_path, "w") as rf:
+        def _sink(cond, rows):
+            if cond not in report_conds:
+                return
+            for r in rows:
+                rf.write(json.dumps(_lean_row(r)) + "\n")
+            rf.flush()
+            try:
+                os.fsync(rf.fileno())
+            except OSError:
+                pass  # best-effort fsync; flush alone already survives a kill
+
+        # naive / always / adaptive in order; adaptive needed before random.
+        for cond in ("naive", "always_reground", "adaptive"):
+            if cond in requested or (cond == "adaptive" and "random_at_budget" in requested):
+                results[cond] = _run_condition(cond, tasks, args.threshold, None,
+                                               args.random_seed, args.num_round_trips,
+                                               _sink, workers=workers)
+
+        if "random_at_budget" in requested:
+            adaptive_summary = _aggregate("adaptive", results["adaptive"])
+            random_rate = adaptive_summary["intervention_rate"]
+            print(f"[relay] adaptive observed intervention rate = {random_rate:.3f} "
+                  f"-> random-at-budget matches it")
+            results["random_at_budget"] = _run_condition(
+                "random_at_budget", tasks, args.threshold, random_rate,
+                args.random_seed, args.num_round_trips, _sink, workers=workers)
+
+    summaries = [_aggregate(c, results[c]) for c in report_conds]
+
+    # Sidecar per-task summary carries final_doc (the lean trace strips it) so the
+    # standalone `python -m relay.weave_leaderboard` can re-score from disk.
+    _write_task_summary(results, report_conds,
+                        os.path.join(args.out_dir, "task_summary.jsonl"))
+    _write_leaderboard_md(summaries, os.path.join(args.out_dir, "leaderboard.md"))
+    _print_leaderboard(summaries)
+    _maybe_gate(summaries)
+    _write_frontier(summaries, os.path.join(args.out_dir, "frontier.png"))
+    _write_demo_case(results, report_conds, os.path.join(args.out_dir, "demo_case.md"))
+
+    print(f"[relay] outputs -> {args.out_dir}/ "
+          "(results.jsonl, task_summary.jsonl, leaderboard.md, frontier.*, demo_case.md)")
+
+    # Publish a Weave Evaluation + Leaderboard from the in-memory results (full
+    # final_doc fidelity, pure lookup, no extra model calls). Only with live Weave;
+    # a failure here never destroys the run's other outputs.
+    if weave_active:
+        try:
+            from relay.weave_leaderboard import (from_run_results,
+                                                 publish_leaderboard,
+                                                 run_evaluations)
+            results_map = from_run_results(results, report_conds)
+            evaluation, _ = run_evaluations(tasks, results_map)
+            if evaluation is not None:
+                publish_leaderboard(evaluation)
+        except Exception as e:
+            print(f"[relay] leaderboard publish failed, run outputs intact: "
+                  f"{type(e).__name__}: {e}")
+
+
+# --------------------------------------------------------------------------- #
+# current_doc/score_components/instruction are kept on the in-memory rows (for
+# Weave + the demo case) but dropped from the lean jsonl trace.
+_LEAN_DROP = ("current_doc", "score_components", "instruction")
+
+
+def _lean_row(r: dict) -> dict:
+    return {k: v for k, v in r.items() if k not in _LEAN_DROP}
+
+
+def _write_task_summary(results, conds, path):
+    """One row per (condition, task): keeps final_doc so the leaderboard tool can
+    re-score from disk without re-running the workflow."""
+    with open(path, "w") as f:
+        for cond in conds:
+            for tid, (_rows, final, counts) in results[cond].items():
+                f.write(json.dumps({
+                    "condition": cond,
+                    "task_id": tid,
+                    "final_doc": counts["final_doc"],
+                    "interventions": counts["interventions"],
+                    "n_steps": counts["steps"],
+                    "cost_proxy": counts["cost_proxy"],
+                    "final_score": final["score"],
+                }) + "\n")
+
+
+def _print_leaderboard(summaries):
+    print()
+    print("Relay — round-trip leaderboard")
+    h = (f"{'condition':<18} | {'avg_score':>9} | {'avg_interv':>10} | "
+         f"{'interv_rate':>11} | {'cost':>6} | {'score/cost':>10}")
+    print(h)
+    print("-" * len(h))
+    for s in summaries:
+        print(f"{s['condition']:<18} | {s['avg_score']:>9.3f} | "
+              f"{s['avg_interventions']:>10.2f} | {s['intervention_rate']:>11.3f} | "
+              f"{s['cost_proxy']:>6.1f} | {s['score_per_cost']:>10.4f}")
+    print()
+
+
+def _write_leaderboard_md(summaries, path):
+    lines = ["# Relay — round-trip leaderboard", "",
+             "| condition | avg_score | avg_interventions | intervention_rate | cost_proxy | score_per_cost |",
+             "|---|---|---|---|---|---|"]
+    for s in summaries:
+        lines.append(f"| {s['condition']} | {s['avg_score']:.3f} | "
+                     f"{s['avg_interventions']:.2f} | {s['intervention_rate']:.3f} | "
+                     f"{s['cost_proxy']:.1f} | {s['score_per_cost']:.4f} |")
+    with open(path, "w") as f:
+        f.write("\n".join(lines) + "\n")
+
+
+def _maybe_gate(summaries):
+    by = {s["condition"]: s for s in summaries}
+    if "naive" in by and "always_reground" in by:
+        gap = by["always_reground"]["avg_score"] - by["naive"]["avg_score"]
+        verdict = "GREEN" if gap >= 0.15 else ("YELLOW" if gap >= 0.05 else "RED")
+        print(f"[gate] always_reground - naive = {gap:+.3f}  ->  {verdict} "
+              "(GREEN >= 0.15, YELLOW 0.05-0.15, RED < 0.05)")
+        if verdict == "RED":
+            print("[gate] RED: increase --num-round-trips, raise --slip-p, or make "
+                  "edits harder before building adaptive deeper.")
+
+
+def _write_frontier(summaries, path):
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception:
+        alt = path.rsplit(".", 1)[0] + ".txt"
+        with open(alt, "w") as f:
+            f.write("condition\tcost_proxy\tavg_score\n")
+            for s in summaries:
+                f.write(f"{s['condition']}\t{s['cost_proxy']:.2f}\t{s['avg_score']:.4f}\n")
+        print(f"[relay] matplotlib not available -> wrote {alt} instead of frontier.png")
+        return
+    fig, ax = plt.subplots(figsize=(6.5, 4.5))
+    for s in summaries:
+        ax.scatter(s["cost_proxy"], s["avg_score"], s=90)
+        ax.annotate(s["condition"], (s["cost_proxy"], s["avg_score"]),
+                    textcoords="offset points", xytext=(6, 4), fontsize=9)
+    ax.set_xlabel("avg cost proxy (edit + repair calls)")
+    ax.set_ylabel("avg structural reconstruction score")
+    ax.set_title("Relay — fidelity vs cost frontier")
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(path, dpi=120)
+
+
+if __name__ == "__main__":
+    main()
