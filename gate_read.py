@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """gate_read.py -- read-only gate reader for outputs/results.jsonl.
 
-Consumes the per-step JSONL trace written by run_all_conditions.py (and, as a
-graceful fallback, the per-hop trace written by run.py) and prints, in one shot:
+Consumes the per-step JSONL trace written by run_all_conditions.py and prints,
+in one shot:
 
   * always - naive mean delta (the mean final_score gap),
   * the per-task spread: how many tasks show a >= 0.15 gap, plus min / max,
@@ -66,9 +66,9 @@ def _task(row: dict):
 def _episode_final(rows: List[dict]) -> float:
     """Final score for one (condition, task) episode.
 
-    Round-trip rows stamp an identical ``final_score`` onto every step; the
-    per-hop run.py schema instead carries a running ``score``, so fall back to
-    the score at the largest hop index.
+    Round-trip rows stamp an identical ``final_score`` onto every step; older
+    per-hop traces instead carry a running ``score``, so fall back to the score
+    at the largest hop index.
     """
     stamped = [r["final_score"] for r in rows if "final_score" in r]
     if stamped:

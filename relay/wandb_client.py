@@ -5,9 +5,8 @@
     project  = $WANDB_PROJECT  (also sent as the "OpenAI-Project" header)
 
 HTTP 429 = the W&B Inference concurrency limit, so we make calls sequentially
-and back off exponentially. Only the real substrates (roundtrip / mcq) use
-this; the mock substrate never touches it, so mock mode needs no key and no
-``openai`` install.
+and back off exponentially. Only the LIVE round-trip path uses this; the mock
+editor never touches it, so mock mode needs no key and no ``openai`` install.
 """
 
 from __future__ import annotations
@@ -29,8 +28,8 @@ class WandbInferenceClient:
         self.project = project or os.environ.get("WANDB_PROJECT")
         if not self.api_key:
             raise RuntimeError(
-                "WANDB_API_KEY not set. Real substrates need W&B Inference creds; "
-                "use `--substrate mock` for the no-key path."
+                "WANDB_API_KEY not set. The LIVE path needs W&B Inference creds; "
+                "use `--mock` for the no-key path."
             )
         try:
             import openai  # lazy: mock mode must not require openai
