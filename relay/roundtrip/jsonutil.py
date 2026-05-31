@@ -31,20 +31,41 @@ def strip_fences(s: str) -> str:
     return s.strip()
 
 
+def _as_doc(obj: Any) -> Optional[dict]:
+    """Normalize a parsed JSON value to the {"records": [...]} doc contract.
+
+    A weak editor sometimes drops the wrapper object and returns a bare array of
+    records. Wrap it so the rest of the pipeline (which assumes a dict and calls
+    ``doc.get("records")``) holds instead of crashing on the degraded output —
+    tolerating this kind of weak-model drift is the harness's whole point.
+    """
+    if isinstance(obj, dict):
+        return obj
+    if isinstance(obj, list):
+        return {"records": obj}
+    return None
+
+
 def parse_doc(state: Any) -> Optional[dict]:
     """Parse a doc that may be a dict, a JSON string, or fenced/pre-amble'd text."""
     if isinstance(state, dict):
         return state
+    if isinstance(state, list):
+        return {"records": state}
     if not isinstance(state, str):
         return None
     s = strip_fences(state)
     try:
-        return json.loads(s)
+        return _as_doc(json.loads(s))
     except Exception:
+        pass
+    # Salvage an object or array substring embedded in prose (object preferred).
+    for lo, hi in (("{", "}"), ("[", "]")):
         try:
-            return json.loads(s[s.index("{"): s.rindex("}") + 1])
+            return _as_doc(json.loads(s[s.index(lo): s.rindex(hi) + 1]))
         except Exception:
-            return None
+            continue
+    return None
 
 
 def dump(doc: Any) -> str:
