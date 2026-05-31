@@ -1,0 +1,6 @@
+# System files
+.DS_Store
+.idea/runConfigurations
+dist
+node_modules
+tmp
