@@ -1,0 +1,3 @@
+usage: run_conditions.py [-h] [--n N] [--depth DEPTH]
+                         [--target-rate TARGET_RATE] [--seed SEED]
+run_conditions.py: error: unrecognized arguments: --domain accounting

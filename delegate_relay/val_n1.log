@@ -1,0 +1,66 @@
+[36m[1mweave[0m: Logged in as Weights & Biases user: amardnagargoje.
+[36m[1mweave[0m: View Weave data at https://wandb.ai/amardnagargoje-ifit/relay-delegate52/weave
+[36m[1mweave[0m: Evaluated 1 of 1 examples
+[36m[1mweave[0m: Evaluation summary {
+[36m[1mweave[0m:   "relay_fidelity_naive": {
+[36m[1mweave[0m:     "fidelity": {
+[36m[1mweave[0m:       "mean": 0.0808
+[36m[1mweave[0m:     }
+[36m[1mweave[0m:   },
+[36m[1mweave[0m:   "model_latency": {
+[36m[1mweave[0m:     "mean": 0.004635334014892578
+[36m[1mweave[0m:   }
+[36m[1mweave[0m: }
+[36m[1mweave[0m: Evaluated 1 of 1 examples
+[36m[1mweave[0m: Evaluation summary {
+[36m[1mweave[0m:   "relay_fidelity_always_reground": {
+[36m[1mweave[0m:     "fidelity": {
+[36m[1mweave[0m:       "mean": 0.0
+[36m[1mweave[0m:     }
+[36m[1mweave[0m:   },
+[36m[1mweave[0m:   "model_latency": {
+[36m[1mweave[0m:     "mean": 0.00026607513427734375
+[36m[1mweave[0m:   }
+[36m[1mweave[0m: }
+[36m[1mweave[0m: Evaluated 1 of 1 examples
+[36m[1mweave[0m: Evaluation summary {
+[36m[1mweave[0m:   "relay_fidelity_adaptive": {
+[36m[1mweave[0m:     "fidelity": {
+[36m[1mweave[0m:       "mean": 0.0875
+[36m[1mweave[0m:     }
+[36m[1mweave[0m:   },
+[36m[1mweave[0m:   "model_latency": {
+[36m[1mweave[0m:     "mean": 0.0003199577331542969
+[36m[1mweave[0m:   }
+[36m[1mweave[0m: }
+[36m[1mweave[0m: Evaluated 1 of 1 examples
+[36m[1mweave[0m: Evaluation summary {
+[36m[1mweave[0m:   "relay_fidelity_random_at_budget": {
+[36m[1mweave[0m:     "fidelity": {
+[36m[1mweave[0m:       "mean": 0.0
+[36m[1mweave[0m:     }
+[36m[1mweave[0m:   },
+[36m[1mweave[0m:   "model_latency": {
+[36m[1mweave[0m:     "mean": 0.00036025047302246094
+[36m[1mweave[0m:   }
+[36m[1mweave[0m: }
+[36m[1mweave[0m: 📦 Published to https://wandb.ai/amardnagargoje-ifit/relay-delegate52/weave/leaderboards/Relay-DELEGATE52-accounting
+[conditions] 1 chains | depth 2 | editor=meta-llama/Llama-3.3-70B-Instruct
+
+[conditions] adaptive threshold @ 70%ile risk = 0.5355
+
+======================================================================
+condition           fidelity  avg_interv    avg_tokens
+----------------------------------------------------------------------
+naive                  0.081        0.00         34193
+always_reground        0.000        2.00         45428
+adaptive               0.087        1.00         46880
+random_at_budget       0.000        1.00         36684
+======================================================================
+adaptive intervention rate: 50%  (budget for random = 1 of 2 boundaries)
+adaptive − random fidelity:  +0.087  (adaptive wins)
+wrote frontier.png
+
+wrote results.jsonl (8 rows), leaderboard.md, frontier.png, demo_case.md
+clean adaptive-fixes-naive chains: 0
+[weave] published Evaluation runs + Leaderboard 'Relay-DELEGATE52-accounting'
