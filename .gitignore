@@ -13,6 +13,5 @@ __pycache__/
 venv/
 .env
 
-# Relay run artifacts (keep the dir via outputs/.gitkeep)
+# Relay run artifacts
 outputs/*
-!outputs/.gitkeep
